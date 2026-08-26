@@ -103,6 +103,10 @@ final class ClaudeAcpSession {
   /// Whether a prompt is actively consuming messages.
   bool get isActive => _active;
 
+  /// Whether [close] has run — the CLI conversation behind this session is
+  /// gone and no further prompt can succeed.
+  bool get isClosed => _closed;
+
   /// Parent Agent/Task tool-use ID for a live subagent identifier.
   String? parentToolUseIdForAgent(String agentId) => _taskParents[agentId];
 

@@ -522,6 +522,12 @@ final class ControlChannel {
     final id = 'req_${++_requestCounter}_${uuidV4().substring(0, 8)}';
     final completer = Completer<JsonMap>();
     _pending[id] = completer;
+    // The listener attaches only after the write below returns — but the read
+    // side can die DURING that await (the transport teardown fails every
+    // pending completer), and an error on a listenerless future escapes to
+    // the zone as unhandled. `ignore()` adds a swallowing listener now; the
+    // real `await` below still receives the error.
+    completer.future.ignore();
     await transport.write(
       encodeJsonLine({
         'type': 'control_request',

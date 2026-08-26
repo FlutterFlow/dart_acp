@@ -7,7 +7,17 @@ import '../json.dart';
 /// Decodes byte chunks containing one JSON object per line.
 final class NdjsonDecoder extends StreamTransformerBase<List<int>, JsonMap> {
   /// Creates a decoder with a per-line byte [maxBufferSize].
-  const NdjsonDecoder({this.maxBufferSize = 1024 * 1024});
+  ///
+  /// The default is deliberately large: Claude Code puts an Edit/Write tool
+  /// result's ENTIRE updated file into a single stream-json line, so ordinary
+  /// work on a large generated file produces multi-megabyte lines. A 1 MiB
+  /// cap — the previous default — killed the connection mid-turn on a ~3 MB
+  /// file, after the edit had already been applied. The cap exists to stop a
+  /// runaway peer, not to bound legitimate output.
+  const NdjsonDecoder({this.maxBufferSize = defaultMaxBufferSize});
+
+  /// 32 MiB.
+  static const int defaultMaxBufferSize = 32 * 1024 * 1024;
 
   /// Maximum bytes accepted for one complete or partial line.
   final int maxBufferSize;

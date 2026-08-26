@@ -58,7 +58,10 @@ final class SubprocessCliTransport implements Transport {
       );
       _process = process;
       final decoded = process.stdout.transform(
-        NdjsonDecoder(maxBufferSize: options.maxBufferSize ?? 1024 * 1024),
+        NdjsonDecoder(
+          maxBufferSize:
+              options.maxBufferSize ?? NdjsonDecoder.defaultMaxBufferSize,
+        ),
       );
       _messages = _messagesWithExit(decoded, process);
       if (options.stderr != null) {

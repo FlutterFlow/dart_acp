@@ -1151,6 +1151,21 @@ final class ClaudeAcpAgent {
     AcpAgentRequestContext<PromptRequest> context,
   ) {
     final session = _requireSession(context.params.sessionId);
+    // A dead session stays registered (so this can say WHY rather than
+    // "session not found"), but nothing can run on it: the CLI conversation
+    // behind it exited. Saying so — with `sessionDead` in the data — is what
+    // lets a client retire its handle and start a replacement, instead of
+    // feeding prompts to a process that is no longer there.
+    if (session.isClosed) {
+      throw JsonRpcRequestException.internalError(
+        data: const <String, Object?>{
+          'message':
+              'The Claude process behind this session has exited; start a '
+              'new session.',
+          'sessionDead': true,
+        },
+      );
+    }
     // A prompt that arrives while a turn is running is what a user typing
     // mid-work looks like. Queuing it behind the running turn (which is what
     // `enqueue` does) hides it until that turn ends — for a long turn the
@@ -1348,6 +1363,14 @@ final class ClaudeAcpAgent {
     AcpAgentContext peer,
     ClaudeAcpSession session,
   ) async {
+    // Whatever ends this loop, the CLI conversation behind the session is
+    // gone: the process exited, or its stream died (e.g. a stdout line over
+    // the transport's buffer limit cancels the whole subscription). The
+    // session is retired HERE, not just its in-flight turn — a session left
+    // registered with a dead client accepted later prompts and dropped them
+    // on the floor, with nothing telling the panel its backend no longer
+    // existed. Closing it makes every later prompt fail fast and lets the
+    // client replace the session.
     try {
       await for (final envelope in session.client.receiveMessageEnvelopes()) {
         await _projectEnvelope(peer, session, envelope);
@@ -1357,11 +1380,20 @@ final class ClaudeAcpAgent {
         JsonRpcRequestException.internalError(
           data: const <String, Object?>{
             'message': 'Claude session ended before returning a turn result.',
+            'sessionDead': true,
           },
         ),
       );
     } on Object catch (error, stackTrace) {
-      session.failTurn(error, stackTrace);
+      session.failTurn(
+        JsonRpcRequestException.internalError(
+          data: <String, Object?>{
+            'message': 'The Claude process died mid-turn: $error',
+            'sessionDead': true,
+          },
+        ),
+        stackTrace,
+      );
       if (session.client.isConnected) {
         _logger.error(
           'Claude session consumer failed',
@@ -1369,6 +1401,20 @@ final class ClaudeAcpAgent {
           stackTrace: stackTrace,
         );
       }
+    } finally {
+      unawaited(_retireDeadSession(session));
+    }
+  }
+
+  /// Closes a session whose CLI conversation ended underneath it, so later
+  /// prompts fail fast ("Session is closed") instead of feeding a dead
+  /// process. `close()` awaits the consumer — this runs FROM the consumer, so
+  /// it must not await itself.
+  Future<void> _retireDeadSession(ClaudeAcpSession session) async {
+    try {
+      await session.close();
+    } on Object {
+      // Closing an already-broken client is best-effort by definition.
     }
   }
 
