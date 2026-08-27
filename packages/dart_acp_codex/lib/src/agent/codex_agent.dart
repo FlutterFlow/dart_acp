@@ -913,6 +913,39 @@ final class CodexAgent {
     return SetSessionConfigOptionResponse(configOptions: _configOptions(state));
   }
 
+  /// `/name args` → `\$name args` when `name` is a skill the app server
+  /// reported. Anything else — unknown names, prompts that don't start with a
+  /// slash, multi-block prompts whose first block isn't the command — passes
+  /// through untouched.
+  List<ContentBlock> _rewriteSkillInvocation(
+    List<ContentBlock> prompt,
+    CodexSessionState state,
+  ) {
+    if (prompt.isEmpty || state.skills.isEmpty) {
+      return prompt;
+    }
+    final first = prompt.first;
+    if (first is! ContentBlockText) {
+      return prompt;
+    }
+    final text = first.toJson()['text'];
+    if (text is! String || !text.startsWith('/')) {
+      return prompt;
+    }
+    final space = text.indexOf(RegExp(r'\s'));
+    final name = (space < 0 ? text.substring(1) : text.substring(1, space))
+        .trim();
+    if (name.isEmpty || !state.skills.any((skill) => skill.name == name)) {
+      return prompt;
+    }
+    return <ContentBlock>[
+      ContentBlockText(
+        TextContent(text: r'$' + name + text.substring(1 + name.length)),
+      ),
+      ...prompt.skip(1),
+    ];
+  }
+
   Future<PromptResponse> _prompt(
     AcpAgentRequestContext<PromptRequest> context,
   ) async {
@@ -927,10 +960,15 @@ final class CodexAgent {
       }
       return PromptResponse(stopReason: StopReason.endTurn);
     }
+    // A client that lists skills as slash commands sends `/name …` — but the
+    // invocation Codex resolves is the `\$name` mention (its /-form is a known
+    // upstream gap, openai/codex#11817), so a leading slash naming a known
+    // skill is rewritten before the turn starts.
+    final prompt = _rewriteSkillInvocation(request.prompt, state);
     final titleMetadata = request.meta;
     await _maybeSetInitialThreadName(
       state,
-      request.prompt,
+      prompt,
       titleHintProvided:
           titleMetadata?.containsKey(codexThreadTitlePromptMetaKey) ?? false,
       titleHint: titleMetadata?[codexThreadTitlePromptMetaKey]?.toObject(),
@@ -941,7 +979,7 @@ final class CodexAgent {
         params: CodexJsonObject.from(<String, Object?>{
           'threadId': state.sessionId.value,
           'expectedTurnId': activeTurn.value,
-          'input': _promptMapper.map(request.prompt),
+          'input': _promptMapper.map(prompt),
         }),
       );
       final completion = state.turnCompletion;
@@ -959,7 +997,7 @@ final class CodexAgent {
         'turn/start',
         params: CodexJsonObject.from(<String, Object?>{
           'threadId': state.sessionId.value,
-          'input': _promptMapper.map(request.prompt),
+          'input': _promptMapper.map(prompt),
           'cwd': state.cwd,
           'approvalPolicy': state.agentMode.approvalPolicy,
           'approvalsReviewer': options
@@ -1441,10 +1479,22 @@ final class CodexAgent {
           return;
         }
         try {
+          // Skills are commands too: the CLI's own composer lists installed
+          // skills next to the built-ins, and a client fed only the built-ins
+          // shows a picker with the user's skills missing. A failed lookup
+          // falls back to the built-ins alone.
+          final skills = await _commands.listSkills(<String>[
+            state.cwd,
+            ...state.additionalDirectories,
+          ]);
+          if (state.isClosed || state.generation != generation) {
+            return;
+          }
+          state.skills = skills;
           await client.updateSession(
             SessionNotification(
               sessionId: state.sessionId,
-              update: _commands.availableCommands(),
+              update: _commands.availableCommands(skills: skills),
             ),
           );
           await _sendGoalUpdate(client, state);

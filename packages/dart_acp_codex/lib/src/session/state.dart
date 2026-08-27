@@ -4,6 +4,7 @@ import 'package:dart_acp_sdk/dart_acp_sdk.dart';
 
 import '../app_server/backend.dart';
 import '../app_server/json_values.dart';
+import '../bridge/commands.dart';
 import '../config/models.dart';
 import '../config/modes.dart';
 
@@ -32,6 +33,12 @@ final class CodexSessionState {
   final List<String> additionalDirectories;
 
   /// Approval and sandbox preset.
+  /// The skills the app server last reported for this session's directories,
+  /// so a `/skill-name` prompt can be recognized and rewritten to the
+  /// `\$skill-name` mention Codex actually resolves.
+  List<CodexSkill> skills = const <CodexSkill>[];
+
+  /// Sandbox and approval preset in effect.
   CodexAgentMode agentMode;
 
   /// Collaboration behavior.

@@ -20,6 +20,19 @@ final class CodexCommandResult {
   final List<SessionUpdate> updates;
 }
 
+/// A skill the app server reports as available, reduced to what the command
+/// list needs.
+final class CodexSkill {
+  /// Creates a skill entry.
+  const CodexSkill({required this.name, required this.description});
+
+  /// The invocation name (`probe-skill`, `openai-templates:foo`).
+  final String name;
+
+  /// What the skill does, for the client's command picker.
+  final String description;
+}
+
 /// Parses and executes adapter-level slash commands.
 final class CodexCommands {
   /// Creates a command service.
@@ -30,7 +43,7 @@ final class CodexCommands {
 
   /// Publishes the commands available without querying the app server.
   SessionUpdate availableCommands({
-    Iterable<String> skills = const <String>[],
+    Iterable<CodexSkill> skills = const <CodexSkill>[],
   }) {
     return SessionUpdate.fromJson(<String, Object?>{
       'sessionUpdate': 'available_commands_update',
@@ -38,12 +51,32 @@ final class CodexCommands {
         for (final command in _builtIns) command,
         for (final skill in skills)
           <String, Object?>{
-            'name': skill,
-            'description': 'Run the $skill skill.',
+            'name': skill.name,
+            'description': skill.description,
             'input': <String, Object?>{'hint': 'optional instructions'},
           },
       ],
     });
+  }
+
+  /// The skills the app server reports for [cwds]. Errors surface as an empty
+  /// list: a failed lookup must not break the session that asked.
+  Future<List<CodexSkill>> listSkills(
+    Iterable<String> cwds, {
+    bool forceReload = false,
+  }) async {
+    try {
+      final response = await backend.request(
+        'skills/list',
+        params: CodexJsonObject.from(<String, Object?>{
+          'cwds': <Object?>[...cwds],
+          'forceReload': forceReload,
+        }),
+      );
+      return parseSkills(response).toList();
+    } on Object {
+      return const <CodexSkill>[];
+    }
   }
 
   /// Executes a recognized built-in command from [prompt].
@@ -72,18 +105,16 @@ final class CodexCommands {
           updates: <SessionUpdate>[_message(_formatMcp(response))],
         );
       case 'skills':
-        final response = await backend.request(
-          'skills/list',
-          params: CodexJsonObject.from(<String, Object?>{
-            'cwds': <Object?>[session.cwd, ...session.additionalDirectories],
-            'forceReload': true,
-          }),
-        );
+        final skills = await listSkills(<String>[
+          session.cwd,
+          ...session.additionalDirectories,
+        ], forceReload: true);
+        session.skills = skills;
         return CodexCommandResult(
           handled: true,
           updates: <SessionUpdate>[
-            availableCommands(skills: _skillNames(response)),
-            _message(_formatSkills(response)),
+            availableCommands(skills: skills),
+            _message(_formatSkills(skills)),
           ],
         );
       case 'compact':
@@ -282,23 +313,61 @@ final class CodexCommands {
     ].join('\n');
   }
 
-  String _formatSkills(CodexJsonObject response) {
-    final names = _skillNames(response);
-    return names.isEmpty
+  String _formatSkills(List<CodexSkill> skills) {
+    return skills.isEmpty
         ? 'No skills are available.'
-        : 'Available skills:\n${names.map((name) => '- $name').join('\n')}';
+        : 'Available skills:\n'
+              '${skills.map((skill) => '- ${skill.name}').join('\n')}';
   }
 
-  Iterable<String> _skillNames(CodexJsonObject response) sync* {
+  /// Reads the skills out of a `skills/list` response. The server groups them
+  /// per working directory — `data[].skills[]` — with the same skill repeated
+  /// under every cwd that can see it (user-level skills always are), so
+  /// entries are de-duplicated by name and disabled ones are dropped.
+  /// A flat `data[]`/`skills[]` list of skills is accepted too.
+  static Iterable<CodexSkill> parseSkills(CodexJsonObject response) sync* {
     final data = response['data'] ?? response['skills'];
     if (data is! List<Object?>) {
       return;
     }
+    final seen = <String>{};
+    Iterable<CodexSkill> ofEntry(Map<Object?, Object?> raw) sync* {
+      final nested = raw['skills'];
+      if (nested is List<Object?>) {
+        // A per-cwd group: recurse into its skills.
+        for (final inner in nested) {
+          if (inner is Map<Object?, Object?>) {
+            yield* ofEntry(inner);
+          }
+        }
+        return;
+      }
+      final name = raw['name'];
+      if (name is! String || name.isEmpty || raw['enabled'] == false) {
+        return;
+      }
+      final interface = raw['interface'];
+      final short = interface is Map<Object?, Object?>
+          ? interface['shortDescription']
+          : null;
+      final description = raw['description'];
+      yield CodexSkill(
+        name: name,
+        description: short is String && short.isNotEmpty
+            ? short
+            : (description is String && description.isNotEmpty
+                  ? description
+                  : 'Run the $name skill.'),
+      );
+    }
+
     for (final raw in data) {
-      if (raw is Map<Object?, Object?>) {
-        final name = raw['name'];
-        if (name is String && name.isNotEmpty) {
-          yield name;
+      if (raw is! Map<Object?, Object?>) {
+        continue;
+      }
+      for (final skill in ofEntry(raw)) {
+        if (seen.add(skill.name)) {
+          yield skill;
         }
       }
     }

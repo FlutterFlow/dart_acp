@@ -133,9 +133,19 @@ final class FakeCodexBackend implements CodexBackend {
         });
         return CodexJsonObject.empty;
       case 'skills/list':
+        // The real server groups skills per cwd (`data[].skills[]`).
         return CodexJsonObject.from(<String, Object?>{
           'data': <Object?>[
-            <String, Object?>{'name': 'demo-skill'},
+            <String, Object?>{
+              'cwd': '/ws',
+              'skills': <Object?>[
+                <String, Object?>{
+                  'name': 'demo-skill',
+                  'description': 'A demo skill.',
+                  'enabled': true,
+                },
+              ],
+            },
           ],
         });
       case 'mcpServerStatus/list':

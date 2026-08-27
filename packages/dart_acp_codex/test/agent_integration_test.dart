@@ -433,7 +433,8 @@ void main() {
       );
       expect(response.stopReason, StopReason.endTurn);
     }
-    expect(harness.backend.count('skills/list'), 1);
+    // Once at session start (skills are commands too) and once for /skills.
+    expect(harness.backend.count('skills/list'), 2);
     expect(harness.backend.count('review/start'), 3);
     expect(
       harness.updates
