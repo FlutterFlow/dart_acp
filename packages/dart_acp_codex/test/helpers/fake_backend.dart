@@ -24,6 +24,14 @@ final class FakeCodexBackend implements CodexBackend {
       StreamController<CodexPendingServerRequest>.broadcast(sync: true);
 
   final List<FakeCodexCall> calls = <FakeCodexCall>[];
+
+  /// Method names in call order, for ordering assertions.
+  List<String> get methods => <String>[for (final call in calls) call.method];
+
+  /// Runtime statuses `mcpServerStatus/list` reports, one server per entry.
+  /// A `config/mcpServer/reload` flips every entry to `connected`, mirroring
+  /// the real respawn.
+  List<String> mcpRuntimeStatuses = <String>['connected'];
   final Map<String, FakeCodexHandler> handlers = <String, FakeCodexHandler>{};
   final List<(CodexThreadId, CodexTurnId)> staleTurns =
       <(CodexThreadId, CodexTurnId)>[];
@@ -132,6 +140,11 @@ final class FakeCodexBackend implements CodexBackend {
           emit('account/login/completed', <String, Object?>{'success': true});
         });
         return CodexJsonObject.empty;
+      case 'config/mcpServer/reload':
+        mcpRuntimeStatuses = <String>[
+          for (final _ in mcpRuntimeStatuses) 'connected',
+        ];
+        return CodexJsonObject.empty;
       case 'skills/list':
         // The real server groups skills per cwd (`data[].skills[]`).
         return CodexJsonObject.from(<String, Object?>{
@@ -151,7 +164,12 @@ final class FakeCodexBackend implements CodexBackend {
       case 'mcpServerStatus/list':
         return CodexJsonObject.from(<String, Object?>{
           'data': <Object?>[
-            <String, Object?>{'name': 'demo', 'status': 'connected'},
+            for (final (i, status) in mcpRuntimeStatuses.indexed)
+              <String, Object?>{
+                'name': 'demo-$i',
+                'status': 'connected',
+                'runtimeStatus': status,
+              },
           ],
         });
       case 'thread/goal/get':

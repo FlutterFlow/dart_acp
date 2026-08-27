@@ -965,6 +965,11 @@ final class CodexAgent {
     // upstream gap, openai/codex#11817), so a leading slash naming a known
     // skill is rewritten before the turn starts.
     final prompt = _rewriteSkillInvocation(request.prompt, state);
+    // A dead MCP server is revived BEFORE the turn, so the first tool call
+    // after a transport death succeeds instead of failing once as a
+    // detection signal. The in-turn heal below stays as the backstop for a
+    // server that dies mid-turn.
+    await _reviveFailedMcpServers(state);
     final titleMetadata = request.meta;
     await _maybeSetInitialThreadName(
       state,
@@ -1273,6 +1278,58 @@ final class CodexAgent {
   /// calls (the model retrying, several tools on the same dead server) asks
   /// for one restart rather than one per failure.
   DateTime? _lastMcpReloadAt;
+
+  /// Revives dead MCP servers before a turn starts. Codex tracks a server's
+  /// pipe health — `runtimeStatus` flips to `failed` within seconds of the
+  /// process dying (probed on 0.150) — but never restarts one on its own, so
+  /// without this the first tool call of the turn fails just to reveal the
+  /// death. Bounded and best-effort throughout: a turn must never be blocked
+  /// on health machinery, so any error or timeout just lets the turn run
+  /// (where the failure-time heal still applies).
+  Future<void> _reviveFailedMcpServers(CodexSessionState state) async {
+    try {
+      final hadFailed = await _anyMcpServerFailed(state);
+      if (!hadFailed) {
+        return;
+      }
+      _lastMcpReloadAt = DateTime.now();
+      await _backend
+          .request('config/mcpServer/reload')
+          .timeout(const Duration(seconds: 5));
+      // Give the respawn a moment to connect, so the turn's first call finds
+      // it up rather than racing the handshake.
+      for (var attempt = 0; attempt < 10; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (!await _anyMcpServerFailed(state)) {
+          return;
+        }
+      }
+    } on Object {
+      // Run the turn regardless.
+    }
+  }
+
+  Future<bool> _anyMcpServerFailed(CodexSessionState state) async {
+    final response = await _backend
+        .request(
+          'mcpServerStatus/list',
+          params: CodexJsonObject.from(<String, Object?>{
+            'threadId': state.sessionId.value,
+            'cwds': <Object?>[state.cwd, ...state.additionalDirectories],
+          }),
+        )
+        .timeout(const Duration(seconds: 3));
+    final data = response['data'] ?? response['servers'];
+    if (data is! List<Object?>) {
+      return false;
+    }
+    for (final raw in data) {
+      if (raw is Map<Object?, Object?> && raw['runtimeStatus'] == 'failed') {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /// Restarts the app server's MCP servers when a tool call dies on a closed
   /// transport, so the very next attempt reconnects instead of every later

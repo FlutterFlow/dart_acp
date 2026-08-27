@@ -1492,4 +1492,60 @@ void _mcpHealTests() {
     await _flush();
     expect(harness.backend.count('config/mcpServer/reload'), 1);
   });
+
+  test(
+    'a server already dead at turn start is revived before the turn',
+    () async {
+      final harness = await _connect(
+        configureBackend: (backend) => backend.mcpRuntimeStatuses = ['failed'],
+      );
+      addTearDown(harness.close);
+      final created = await harness.pair.client.agent.createSession(
+        NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+      );
+      await _flush();
+
+      // The reload happens as part of sending the prompt — before turn/start —
+      // and the turn still runs. The fake flips the server healthy once
+      // reloaded, mirroring the real respawn.
+      final turn = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: created.sessionId,
+          prompt: <ContentBlock>[_text('take a screenshot')],
+        ),
+      );
+      // The revive path waits ~250ms for the respawn to report healthy before
+      // it starts the turn, so wait for turn/start rather than a single flush.
+      for (var i = 0; i < 40 && harness.backend.count('turn/start') == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      expect(harness.backend.count('config/mcpServer/reload'), 1);
+      final callOrder = harness.backend.methods;
+      expect(callOrder, contains('turn/start'));
+      expect(
+        callOrder.indexOf('config/mcpServer/reload'),
+        lessThan(callOrder.lastIndexOf('turn/start')),
+        reason: 'revive must come before the turn',
+      );
+      harness.backend.emit('turn/completed', <String, Object?>{
+        'turn': <String, Object?>{'id': 'turn-1', 'status': 'completed'},
+      }, threadId: created.sessionId.value);
+      await turn;
+
+      // A healthy fleet costs one status check and no reload.
+      final before = harness.backend.count('config/mcpServer/reload');
+      final second = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: created.sessionId,
+          prompt: <ContentBlock>[_text('and again')],
+        ),
+      );
+      await _flush();
+      expect(harness.backend.count('config/mcpServer/reload'), before);
+      harness.backend.emit('turn/completed', <String, Object?>{
+        'turn': <String, Object?>{'id': 'turn-2', 'status': 'completed'},
+      }, threadId: created.sessionId.value);
+      await second;
+    },
+  );
 }
