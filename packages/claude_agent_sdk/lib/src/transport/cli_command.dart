@@ -47,9 +47,25 @@ Future<CliLaunchPlan> createCliLaunchPlan(
 }) async {
   final environment = parentEnvironment ?? Platform.environment;
   final windows = isWindows ?? Platform.isWindows;
-  final executable = options.cliPath ?? findCli(environment, windows: windows);
+  var executable = options.cliPath ?? findCli(environment, windows: windows);
+  var scriptArguments = const <String>[];
+  if (windows && isWindowsBatchLauncher(executable)) {
+    // npm installs ship only a `claude.cmd` shim (no native claude.exe), so
+    // refusing every batch launcher outright bricks those installs. The shim
+    // is one generated line that runs `node <package>/cli.js %*` — resolve
+    // that target and spawn node directly, which keeps arguments away from
+    // cmd.exe entirely.
+    final shim = resolveWindowsCmdShim(executable, environment);
+    if (shim != null) {
+      executable = shim.node;
+      scriptArguments = [shim.script];
+    }
+  }
   rejectWindowsBatchCli(executable, windows: windows);
-  final arguments = await buildCliArguments(options, windows: windows);
+  final arguments = [
+    ...scriptArguments,
+    ...await buildCliArguments(options, windows: windows),
+  ];
   final childEnvironment = <String, String>{
     for (final entry in environment.entries)
       if (entry.key != 'CLAUDECODE') entry.key: entry.value,
@@ -124,9 +140,75 @@ void rejectWindowsBatchCli(String executable, {required bool windows}) {
   if (isBatch) {
     throw CliConnectionException(
       'Refusing to execute Windows batch script $executable because cmd.exe '
-      'can reinterpret untrusted CLI arguments. Use a native claude.exe.',
+      'can reinterpret untrusted CLI arguments, and the script could not be '
+      'resolved to a direct `node <cli.js>` launch. Install the native '
+      'claude.exe, or provide ClaudeAgentOptions(cliPath: ...).',
     );
   }
+}
+
+/// Whether [executable] is a Windows batch launcher (`.cmd`/`.bat`).
+bool isWindowsBatchLauncher(String executable) {
+  final normalized = executable
+      .replaceFirst(RegExp(r'[. ]+$'), '')
+      .toLowerCase();
+  return normalized.endsWith('.cmd') || normalized.endsWith('.bat');
+}
+
+/// A `.cmd` shim resolved to a direct `node <script>` launch.
+typedef ResolvedCmdShim = ({String node, String script});
+
+/// The `"%_prog%" "%dp0%\<target>.js" %*` line of an npm/pnpm cmd-shim —
+/// the generated launcher's only load-bearing part. `%dp0%` (or `%~dp0`) is
+/// the shim's own directory.
+final RegExp _cmdShimScript = RegExp(
+  r'"%(?:~)?dp0%?[\\/]([^"\r\n]+\.[cm]?js)"',
+);
+
+/// Resolves an npm-style `claude.cmd` shim to the Node script it launches,
+/// so the CLI can be spawned as `node <cli.js>` without cmd.exe in the
+/// middle. Returns null when [executable] is not a recognizable shim, its
+/// target script is missing, or no `node.exe` can be found — the caller then
+/// falls back to [rejectWindowsBatchCli].
+ResolvedCmdShim? resolveWindowsCmdShim(
+  String executable,
+  Map<String, String> environment,
+) {
+  final String content;
+  try {
+    content = File(executable).readAsStringSync();
+  } on Object {
+    return null;
+  }
+  // A real cmd-shim is a small generated file; anything big is not one.
+  if (content.length > 8192) return null;
+  final match = _cmdShimScript.firstMatch(content);
+  if (match == null) return null;
+  final shimDirectory = p.dirname(executable);
+  final script = p.joinAll([
+    shimDirectory,
+    ...match.group(1)!.split(RegExp(r'[\\/]+')),
+  ]);
+  if (!File(script).existsSync()) return null;
+  final node = _findNodeForShim(shimDirectory, environment);
+  if (node == null) return null;
+  return (node: node, script: script);
+}
+
+/// The `node.exe` the shim itself would use: one beside the shim first (the
+/// layout npm's cmd-shim prefers), then the PATH.
+String? _findNodeForShim(
+  String shimDirectory,
+  Map<String, String> environment,
+) {
+  final sibling = p.join(shimDirectory, 'node.exe');
+  if (File(sibling).existsSync()) return sibling;
+  for (final directory in (environment['PATH'] ?? '').split(';')) {
+    if (directory.isEmpty) continue;
+    final candidate = p.join(directory, 'node.exe');
+    if (File(candidate).existsSync()) return candidate;
+  }
+  return null;
 }
 
 /// Rejects values that are unsafe if interpreted by `cmd.exe`.
