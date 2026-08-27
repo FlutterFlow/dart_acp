@@ -913,6 +913,14 @@ final class CodexAgent {
     return SetSessionConfigOptionResponse(configOptions: _configOptions(state));
   }
 
+  static bool _startsWithSlash(List<ContentBlock> prompt) {
+    if (prompt.isEmpty) return false;
+    final first = prompt.first;
+    if (first is! ContentBlockText) return false;
+    final text = first.toJson()['text'];
+    return text is String && text.startsWith('/');
+  }
+
   /// `/name args` → `\$name args` when `name` is a skill the app server
   /// reported. Anything else — unknown names, prompts that don't start with a
   /// slash, multi-block prompts whose first block isn't the command — passes
@@ -964,6 +972,20 @@ final class CodexAgent {
     // invocation Codex resolves is the `\$name` mention (its /-form is a known
     // upstream gap, openai/codex#11817), so a leading slash naming a known
     // skill is rewritten before the turn starts.
+    //
+    // Clients cache the command list so their picker works before a session
+    // exists, and start the session on the first prompt — so a cached skill
+    // can arrive while the session-start discovery is still in flight, when
+    // [CodexSessionState.skills] is empty and the rewrite would silently pass
+    // the slash form through. A slash prompt waits (bounded) for discovery;
+    // everything else pays nothing.
+    if (state.skills.isEmpty && _startsWithSlash(request.prompt)) {
+      try {
+        await state.skillsDiscovery?.timeout(const Duration(seconds: 10));
+      } on Object {
+        // Discovery failing or dragging must not block the prompt.
+      }
+    }
     final prompt = _rewriteSkillInvocation(request.prompt, state);
     // A dead MCP server is revived BEFORE the turn, so the first tool call
     // after a transport death succeeds instead of failing once as a
@@ -1578,39 +1600,39 @@ final class CodexAgent {
     CodexSessionState state,
   ) {
     final generation = state.generation;
-    unawaited(
-      Future<void>(() async {
-        await client.lifecycle.ready;
-        if (state.isClosed ||
-            state.generation != generation ||
-            !client.lifecycle.isReady) {
+    final discovery = Future<void>(() async {
+      await client.lifecycle.ready;
+      if (state.isClosed ||
+          state.generation != generation ||
+          !client.lifecycle.isReady) {
+        return;
+      }
+      try {
+        // Skills are commands too: the CLI's own composer lists installed
+        // skills next to the built-ins, and a client fed only the built-ins
+        // shows a picker with the user's skills missing. A failed lookup
+        // falls back to the built-ins alone.
+        final skills = await _commands.listSkills(<String>[
+          state.cwd,
+          ...state.additionalDirectories,
+        ]);
+        if (state.isClosed || state.generation != generation) {
           return;
         }
-        try {
-          // Skills are commands too: the CLI's own composer lists installed
-          // skills next to the built-ins, and a client fed only the built-ins
-          // shows a picker with the user's skills missing. A failed lookup
-          // falls back to the built-ins alone.
-          final skills = await _commands.listSkills(<String>[
-            state.cwd,
-            ...state.additionalDirectories,
-          ]);
-          if (state.isClosed || state.generation != generation) {
-            return;
-          }
-          state.skills = skills;
-          await client.updateSession(
-            SessionNotification(
-              sessionId: state.sessionId,
-              update: _commands.availableCommands(skills: skills),
-            ),
-          );
-          await _sendGoalUpdate(client, state);
-        } on AcpConnectionStateException {
-          // The connection can close between the readiness check and send.
-        }
-      }),
-    );
+        state.skills = skills;
+        await client.updateSession(
+          SessionNotification(
+            sessionId: state.sessionId,
+            update: _commands.availableCommands(skills: skills),
+          ),
+        );
+        await _sendGoalUpdate(client, state);
+      } on AcpConnectionStateException {
+        // The connection can close between the readiness check and send.
+      }
+    });
+    state.skillsDiscovery = discovery;
+    unawaited(discovery);
   }
 
   Future<void> _sendGoalUpdate(

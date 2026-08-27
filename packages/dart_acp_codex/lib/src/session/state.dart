@@ -33,6 +33,12 @@ final class CodexSessionState {
   final List<String> additionalDirectories;
 
   /// Approval and sandbox preset.
+  /// Completes when the session-start skill discovery has run (successfully
+  /// or not), so a slash prompt sent immediately after the session starts —
+  /// the panel's cached picker makes that a normal path — can wait for
+  /// [skills] instead of silently skipping the invocation rewrite.
+  Future<void>? skillsDiscovery;
+
   /// The skills the app server last reported for this session's directories,
   /// so a `/skill-name` prompt can be recognized and rewritten to the
   /// `\$skill-name` mention Codex actually resolves.
