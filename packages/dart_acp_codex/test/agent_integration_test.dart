@@ -133,66 +133,72 @@ Future<void> _flush() => Future<void>.delayed(Duration.zero);
 
 void main() {
   _mcpHealTests();
-  test('a cached skill sent as the first prompt still invokes the skill',
-      () async {
-    // The panel's picker works from a cache before the session exists, so the
-    // first prompt can be a skill while session-start discovery is still in
-    // flight. The rewrite must wait for it rather than silently passing the
-    // slash form through (Codex only resolves the mention form).
-    final skillsListed = Completer<void>();
-    final harness = await _connect(
-      configureBackend: (backend) {
-        backend.handlers['skills/list'] = (params) async {
-          await skillsListed.future; // discovery is still in flight
-          return CodexJsonObject.from(<String, Object?>{
-            'data': <Object?>[
-              <String, Object?>{
-                'cwd': '/workspace',
-                'skills': <Object?>[
-                  <String, Object?>{
-                    'name': 'demo-skill',
-                    'description': 'A demo skill.',
-                    'enabled': true,
-                  },
-                ],
-              },
-            ],
-          });
-        };
-      },
-    );
-    addTearDown(harness.close);
-    final created = await harness.pair.client.agent.createSession(
-      NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
-    );
+  test(
+    'a cached skill sent as the first prompt still invokes the skill',
+    () async {
+      // The panel's picker works from a cache before the session exists, so the
+      // first prompt can be a skill while session-start discovery is still in
+      // flight. The rewrite must wait for it rather than silently passing the
+      // slash form through (Codex only resolves the mention form).
+      final skillsListed = Completer<void>();
+      final harness = await _connect(
+        configureBackend: (backend) {
+          backend.handlers['skills/list'] = (params) async {
+            await skillsListed.future; // discovery is still in flight
+            return CodexJsonObject.from(<String, Object?>{
+              'data': <Object?>[
+                <String, Object?>{
+                  'cwd': '/workspace',
+                  'skills': <Object?>[
+                    <String, Object?>{
+                      'name': 'demo-skill',
+                      'description': 'A demo skill.',
+                      'enabled': true,
+                    },
+                  ],
+                },
+              ],
+            });
+          };
+        },
+      );
+      addTearDown(harness.close);
+      final created = await harness.pair.client.agent.createSession(
+        NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+      );
 
-    // No flush: the prompt races discovery, exactly as a cached pick does.
-    final turn = harness.pair.client.agent.sendPrompt(
-      PromptRequest(
-        sessionId: created.sessionId,
-        prompt: <ContentBlock>[_text('/demo-skill do the thing')],
-      ),
-    );
-    await _flush();
-    expect(harness.backend.count('turn/start'), 0,
-        reason: 'the slash prompt waits for discovery');
-    skillsListed.complete();
-    for (var i = 0; i < 40 && harness.backend.count('turn/start') == 0; i++) {
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    final turnStart = harness.backend.calls
-        .lastWhere((call) => call.method == 'turn/start');
-    final input = turnStart.params['input'];
-    expect(
-      (input as List<Object?>).first,
-      containsPair('text', r'$demo-skill do the thing'),
-      reason: 'the cached pick must reach Codex as the mention form',
-    );
-    harness.backend.emit('turn/completed', <String, Object?>{
-      'turn': <String, Object?>{'id': 'turn-1', 'status': 'completed'},
-    }, threadId: created.sessionId.value);
-    await turn;
-  });
+      // No flush: the prompt races discovery, exactly as a cached pick does.
+      final turn = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: created.sessionId,
+          prompt: <ContentBlock>[_text('/demo-skill do the thing')],
+        ),
+      );
+      await _flush();
+      expect(
+        harness.backend.count('turn/start'),
+        0,
+        reason: 'the slash prompt waits for discovery',
+      );
+      skillsListed.complete();
+      for (var i = 0; i < 40 && harness.backend.count('turn/start') == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      final turnStart = harness.backend.calls.lastWhere(
+        (call) => call.method == 'turn/start',
+      );
+      final input = turnStart.params['input'];
+      expect(
+        (input as List<Object?>).first,
+        containsPair('text', r'$demo-skill do the thing'),
+        reason: 'the cached pick must reach Codex as the mention form',
+      );
+      harness.backend.emit('turn/completed', <String, Object?>{
+        'turn': <String, Object?>{'id': 'turn-1', 'status': 'completed'},
+      }, threadId: created.sessionId.value);
+      await turn;
+    },
+  );
 
   test('initializes, authenticates, and configures providers', () async {
     final harness = await _connect(
@@ -1603,6 +1609,66 @@ void _mcpHealTests() {
       );
       await _flush();
       expect(harness.backend.count('config/mcpServer/reload'), before);
+      harness.backend.emit('turn/completed', <String, Object?>{
+        'turn': <String, Object?>{'id': 'turn-2', 'status': 'completed'},
+      }, threadId: created.sessionId.value);
+      await second;
+    },
+  );
+
+  test(
+    'an unrecoverable MCP server stops stalling prompts after one attempt',
+    () async {
+      final harness = await _connect(
+        options: CodexAdapterOptions(
+          environment: const <String, String>{},
+          mcpRevivePollInterval: const Duration(milliseconds: 10),
+          mcpRevivePollAttempts: 3,
+        ),
+        configureBackend: (backend) => backend
+          ..mcpRuntimeStatuses = ['failed']
+          ..mcpReloadRevives = false,
+      );
+      addTearDown(harness.close);
+      final created = await harness.pair.client.agent.createSession(
+        NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+      );
+      await _flush();
+
+      // First prompt: one revive attempt (reload + bounded wait), then the
+      // turn runs even though the server never recovered.
+      final first = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: created.sessionId,
+          prompt: <ContentBlock>[_text('take a screenshot')],
+        ),
+      );
+      for (var i = 0; i < 40 && harness.backend.count('turn/start') == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+      expect(harness.backend.count('turn/start'), 1);
+      expect(harness.backend.count('config/mcpServer/reload'), 1);
+      harness.backend.emit('turn/completed', <String, Object?>{
+        'turn': <String, Object?>{'id': 'turn-1', 'status': 'completed'},
+      }, threadId: created.sessionId.value);
+      await first;
+
+      // Second prompt: the failure is remembered, so the turn starts without
+      // another reload — and without even re-polling server health (which is
+      // what held every prompt for the full waiting window).
+      final statusChecks = harness.backend.count('mcpServerStatus/list');
+      final second = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: created.sessionId,
+          prompt: <ContentBlock>[_text('and again')],
+        ),
+      );
+      for (var i = 0; i < 40 && harness.backend.count('turn/start') < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+      expect(harness.backend.count('turn/start'), 2);
+      expect(harness.backend.count('config/mcpServer/reload'), 1);
+      expect(harness.backend.count('mcpServerStatus/list'), statusChecks);
       harness.backend.emit('turn/completed', <String, Object?>{
         'turn': <String, Object?>{'id': 'turn-2', 'status': 'completed'},
       }, threadId: created.sessionId.value);

@@ -32,6 +32,11 @@ final class FakeCodexBackend implements CodexBackend {
   /// A `config/mcpServer/reload` flips every entry to `connected`, mirroring
   /// the real respawn.
   List<String> mcpRuntimeStatuses = <String>['connected'];
+
+  /// Whether a reload actually revives the fleet. False models a server that
+  /// cannot come back (missing executable, crash loop): the reload succeeds
+  /// as a request, but statuses stay `failed`.
+  bool mcpReloadRevives = true;
   final Map<String, FakeCodexHandler> handlers = <String, FakeCodexHandler>{};
   final List<(CodexThreadId, CodexTurnId)> staleTurns =
       <(CodexThreadId, CodexTurnId)>[];
@@ -141,9 +146,11 @@ final class FakeCodexBackend implements CodexBackend {
         });
         return CodexJsonObject.empty;
       case 'config/mcpServer/reload':
-        mcpRuntimeStatuses = <String>[
-          for (final _ in mcpRuntimeStatuses) 'connected',
-        ];
+        if (mcpReloadRevives) {
+          mcpRuntimeStatuses = <String>[
+            for (final _ in mcpRuntimeStatuses) 'connected',
+          ];
+        }
         return CodexJsonObject.empty;
       case 'skills/list':
         // The real server groups skills per cwd (`data[].skills[]`).

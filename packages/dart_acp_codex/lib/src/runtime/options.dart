@@ -32,6 +32,8 @@ final class CodexAdapterOptions {
     this.workspaceWriteApprovalsReviewer = CodexApprovalsReviewer.user,
     this.shutdownTimeout = const Duration(seconds: 2),
     this.maximumStderrTailCharacters = 2048,
+    this.mcpRevivePollInterval = const Duration(milliseconds: 300),
+    this.mcpRevivePollAttempts = 30,
     this.onDiagnostic,
   }) : configuration = configuration ?? CodexJsonObject.empty,
        environment = UnmodifiableMapView<String, String>(
@@ -50,6 +52,16 @@ final class CodexAdapterOptions {
     if (maximumStderrTailCharacters <= 0) {
       throw const CodexConfigurationException(
         'Maximum stderr tail characters must be positive.',
+      );
+    }
+    if (mcpRevivePollInterval <= Duration.zero) {
+      throw const CodexConfigurationException(
+        'MCP revive poll interval must be positive.',
+      );
+    }
+    if (mcpRevivePollAttempts < 0) {
+      throw const CodexConfigurationException(
+        'MCP revive poll attempts must not be negative.',
       );
     }
   }
@@ -96,6 +108,15 @@ final class CodexAdapterOptions {
 
   /// Maximum stderr characters retained for process-failure context.
   final int maximumStderrTailCharacters;
+
+  /// How often the pre-turn MCP revive re-checks server health while waiting
+  /// for a reloaded server to come back up.
+  final Duration mcpRevivePollInterval;
+
+  /// How many health re-checks the pre-turn MCP revive makes before giving
+  /// up on the reload and letting the turn run (and suppressing further
+  /// revive attempts for a while).
+  final int mcpRevivePollAttempts;
 
   /// Receives redacted diagnostics.
   final void Function(CodexDiagnostic diagnostic)? onDiagnostic;

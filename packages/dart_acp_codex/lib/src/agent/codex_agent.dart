@@ -1301,6 +1301,24 @@ final class CodexAgent {
   /// for one restart rather than one per failure.
   DateTime? _lastMcpReloadAt;
 
+  /// Minimum spacing between reload requests, shared by the pre-turn revive
+  /// and the failure-time heal so they never restart servers mid-handshake
+  /// on top of each other.
+  static const Duration _mcpReloadCooldown = Duration(seconds: 20);
+
+  /// Until when pre-turn revival is suppressed because the last attempt left
+  /// servers failed anyway. A server that stays failed after a reload (a
+  /// missing executable, bad credentials, a crash loop) is not going to be
+  /// fixed by reloading harder — without this, every prompt would pay the
+  /// full reload-and-wait window for the rest of the session.
+  DateTime? _reviveSuppressedUntil;
+
+  /// Suppression grows on each consecutive unsuccessful revive and resets the
+  /// moment the fleet reports healthy.
+  Duration _reviveSuppression = _initialReviveSuppression;
+  static const Duration _initialReviveSuppression = Duration(minutes: 1);
+  static const Duration _maxReviveSuppression = Duration(minutes: 10);
+
   /// Revives dead MCP servers before a turn starts. Codex tracks a server's
   /// pipe health — `runtimeStatus` flips to `failed` within seconds of the
   /// process dying (probed on 0.150) — but never restarts one on its own, so
@@ -1310,26 +1328,58 @@ final class CodexAgent {
   /// (where the failure-time heal still applies).
   Future<void> _reviveFailedMcpServers(CodexSessionState state) async {
     try {
-      final hadFailed = await _anyMcpServerFailed(state);
-      if (!hadFailed) {
+      if (_reviveSuppressedUntil case final until?
+          when DateTime.now().isBefore(until)) {
+        // The last attempt already reloaded and waited, and the server stayed
+        // failed. Let the turn run immediately; the failure-time heal still
+        // covers any server that can actually be revived.
         return;
       }
-      _lastMcpReloadAt = DateTime.now();
-      await _backend
-          .request('config/mcpServer/reload')
-          .timeout(const Duration(seconds: 5));
+      final hadFailed = await _anyMcpServerFailed(state);
+      if (!hadFailed) {
+        _reviveSuppressedUntil = null;
+        _reviveSuppression = _initialReviveSuppression;
+        return;
+      }
+      // The failure-time heal may have requested a reload moments ago (its
+      // burst cooldown below) — then the respawn is already in flight, and a
+      // second reload would only restart servers mid-handshake. Skip straight
+      // to waiting for it.
+      final now = DateTime.now();
+      final lastReload = _lastMcpReloadAt;
+      final reloadInFlight =
+          lastReload != null && now.difference(lastReload) < _mcpReloadCooldown;
+      if (!reloadInFlight) {
+        _lastMcpReloadAt = now;
+        await _backend
+            .request('config/mcpServer/reload')
+            .timeout(const Duration(seconds: 5));
+      }
       // Give the respawn time to connect, so the turn's first call finds it
-      // up rather than racing the handshake. Bounded at ~9s but exits the
-      // moment the fleet reports healthy — a real server (the FlutterFlow one
-      // initializes an SDK on boot) can need several seconds, and a first
-      // call that works is worth a short wait on a turn that would otherwise
-      // open with failures.
-      for (var attempt = 0; attempt < 30; attempt++) {
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+      // up rather than racing the handshake. Bounded (~9s at the defaults)
+      // but exits the moment the fleet reports healthy — a real server (the
+      // FlutterFlow one initializes an SDK on boot) can need several seconds,
+      // and a first call that works is worth a short wait on a turn that
+      // would otherwise open with failures.
+      for (
+        var attempt = 0;
+        attempt < options.mcpRevivePollAttempts;
+        attempt++
+      ) {
+        await Future<void>.delayed(options.mcpRevivePollInterval);
         if (!await _anyMcpServerFailed(state)) {
+          _reviveSuppressedUntil = null;
+          _reviveSuppression = _initialReviveSuppression;
           return;
         }
       }
+      // Reloading did not help, so it will not help next turn either.
+      // Suppress with growing spacing; a later successful check resets it.
+      _reviveSuppressedUntil = DateTime.now().add(_reviveSuppression);
+      final doubled = _reviveSuppression * 2;
+      _reviveSuppression = doubled > _maxReviveSuppression
+          ? _maxReviveSuppression
+          : doubled;
     } on Object {
       // Run the turn regardless.
     }
@@ -1387,7 +1437,7 @@ final class CodexAgent {
     }
     final now = DateTime.now();
     if (_lastMcpReloadAt case final last?
-        when now.difference(last) < const Duration(seconds: 20)) {
+        when now.difference(last) < _mcpReloadCooldown) {
       return;
     }
     _lastMcpReloadAt = now;
