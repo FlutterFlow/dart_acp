@@ -298,16 +298,10 @@ void main() {
         '${temporary.path}/node_modules/@anthropic-ai/claude-code/cli.js',
       )..createSync(recursive: true);
       final node = File('${temporary.path}/node.exe')..writeAsStringSync('');
-      // Verbatim shape of npm's generated cmd-shim launcher line.
+      // Resolution is by npm's install layout — the shim's content is never
+      // read (cmd-shim's generated script is an implementation detail).
       final shim = File('${temporary.path}/claude.cmd')
-        ..writeAsStringSync(
-          '@ECHO off\r\n'
-          'SETLOCAL\r\n'
-          'CALL :find_dp0\r\n'
-          'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & '
-          '"%_prog%"  '
-          '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n',
-        );
+        ..writeAsStringSync('@ECHO off\r\n');
 
       final plan = await createCliLaunchPlan(
         ClaudeAgentOptions(cliPath: shim.path),
@@ -330,10 +324,7 @@ void main() {
       final node = File('${nodeDirectory.path}/node.exe')
         ..writeAsStringSync('');
       final shim = File('${temporary.path}/claude.cmd')
-        ..writeAsStringSync(
-          '"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code'
-          '\\cli.js" %*\r\n',
-        );
+        ..writeAsStringSync('@ECHO off\r\n');
 
       final plan = await createCliLaunchPlan(
         ClaudeAgentOptions(cliPath: shim.path),
@@ -344,32 +335,34 @@ void main() {
       expect(plan.arguments.first, script.path);
     });
 
-    test('still rejects a .cmd that is not a resolvable shim', () async {
-      final temporary = Directory.systemTemp.createTempSync('claude-shim-');
-      addTearDown(() => temporary.deleteSync(recursive: true));
-      // No node script reference at all — an arbitrary batch file.
-      final shim = File('${temporary.path}/claude.cmd')
-        ..writeAsStringSync('@ECHO off\r\nstart something %*\r\n');
+    test(
+      'still rejects a .cmd with no claude-code package beside it',
+      () async {
+        final temporary = Directory.systemTemp.createTempSync('claude-shim-');
+        addTearDown(() => temporary.deleteSync(recursive: true));
+        // An arbitrary batch file, not an npm bin directory.
+        final shim = File('${temporary.path}/claude.cmd')
+          ..writeAsStringSync('@ECHO off\r\nstart something %*\r\n');
 
-      await expectLater(
-        createCliLaunchPlan(
-          ClaudeAgentOptions(cliPath: shim.path),
-          parentEnvironment: const {},
-          isWindows: true,
-        ),
-        throwsA(isA<CliConnectionException>()),
-      );
-    });
-
-    test('still rejects a shim whose target script is missing', () async {
-      final temporary = Directory.systemTemp.createTempSync('claude-shim-');
-      addTearDown(() => temporary.deleteSync(recursive: true));
-      File('${temporary.path}/node.exe').writeAsStringSync('');
-      final shim = File('${temporary.path}/claude.cmd')
-        ..writeAsStringSync(
-          '"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code'
-          '\\cli.js" %*\r\n',
+        await expectLater(
+          createCliLaunchPlan(
+            ClaudeAgentOptions(cliPath: shim.path),
+            parentEnvironment: const {},
+            isWindows: true,
+          ),
+          throwsA(isA<CliConnectionException>()),
         );
+      },
+    );
+
+    test('still rejects a shim when no node.exe can be found', () async {
+      final temporary = Directory.systemTemp.createTempSync('claude-shim-');
+      addTearDown(() => temporary.deleteSync(recursive: true));
+      File(
+        '${temporary.path}/node_modules/@anthropic-ai/claude-code/cli.js',
+      ).createSync(recursive: true);
+      final shim = File('${temporary.path}/claude.cmd')
+        ..writeAsStringSync('@ECHO off\r\n');
 
       await expectLater(
         createCliLaunchPlan(

@@ -52,9 +52,9 @@ Future<CliLaunchPlan> createCliLaunchPlan(
   if (windows && isWindowsBatchLauncher(executable)) {
     // npm installs ship only a `claude.cmd` shim (no native claude.exe), so
     // refusing every batch launcher outright bricks those installs. The shim
-    // is one generated line that runs `node <package>/cli.js %*` — resolve
-    // that target and spawn node directly, which keeps arguments away from
-    // cmd.exe entirely.
+    // only stands for `node <package>/cli.js %*` — resolve that target from
+    // npm's install layout and spawn node directly, which keeps arguments
+    // away from cmd.exe entirely.
     final shim = resolveWindowsCmdShim(executable, environment);
     if (shim != null) {
       executable = shim.node;
@@ -158,41 +158,34 @@ bool isWindowsBatchLauncher(String executable) {
 /// A `.cmd` shim resolved to a direct `node <script>` launch.
 typedef ResolvedCmdShim = ({String node, String script});
 
-/// The `"%_prog%" "%dp0%\<target>.js" %*` line of an npm/pnpm cmd-shim —
-/// the generated launcher's only load-bearing part. `%dp0%` (or `%~dp0`) is
-/// the shim's own directory.
-final RegExp _cmdShimScript = RegExp(
-  r'"%(?:~)?dp0%?[\\/]([^"\r\n]+\.[cm]?js)"',
-);
+/// Node script targets a `claude` batch shim stands for, relative to the
+/// shim's own directory. npm's global layout puts the package beside its bin
+/// shims, so this is a documented location — parsing the generated .cmd
+/// itself would mean guessing at cmd-shim's implementation details, which
+/// are free to change between npm versions.
+const List<List<String>> _claudeShimScriptLayouts = [
+  ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
+];
 
-/// Resolves an npm-style `claude.cmd` shim to the Node script it launches,
+/// Resolves an npm-style `claude.cmd` shim to the Node script it stands for,
 /// so the CLI can be spawned as `node <cli.js>` without cmd.exe in the
-/// middle. Returns null when [executable] is not a recognizable shim, its
-/// target script is missing, or no `node.exe` can be found — the caller then
-/// falls back to [rejectWindowsBatchCli].
+/// middle. Resolution is by npm's install layout (existence checks only, the
+/// shim's content is never read). Returns null when no known layout matches
+/// or no `node.exe` can be found — the caller then falls back to
+/// [rejectWindowsBatchCli].
 ResolvedCmdShim? resolveWindowsCmdShim(
   String executable,
   Map<String, String> environment,
 ) {
-  final String content;
-  try {
-    content = File(executable).readAsStringSync();
-  } on Object {
-    return null;
-  }
-  // A real cmd-shim is a small generated file; anything big is not one.
-  if (content.length > 8192) return null;
-  final match = _cmdShimScript.firstMatch(content);
-  if (match == null) return null;
   final shimDirectory = p.dirname(executable);
-  final script = p.joinAll([
-    shimDirectory,
-    ...match.group(1)!.split(RegExp(r'[\\/]+')),
-  ]);
-  if (!File(script).existsSync()) return null;
-  final node = _findNodeForShim(shimDirectory, environment);
-  if (node == null) return null;
-  return (node: node, script: script);
+  for (final layout in _claudeShimScriptLayouts) {
+    final script = p.joinAll([shimDirectory, ...layout]);
+    if (!File(script).existsSync()) continue;
+    final node = _findNodeForShim(shimDirectory, environment);
+    if (node == null) return null;
+    return (node: node, script: script);
+  }
+  return null;
 }
 
 /// The `node.exe` the shim itself would use: one beside the shim first (the
