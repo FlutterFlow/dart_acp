@@ -50,15 +50,15 @@ Future<CliLaunchPlan> createCliLaunchPlan(
   var executable = options.cliPath ?? findCli(environment, windows: windows);
   var scriptArguments = const <String>[];
   if (windows && isWindowsBatchLauncher(executable)) {
-    // npm installs ship only a `claude.cmd` shim (no native claude.exe), so
-    // refusing every batch launcher outright bricks those installs. The shim
-    // only stands for `node <package>/cli.js %*` — resolve that target from
-    // npm's install layout and spawn node directly, which keeps arguments
-    // away from cmd.exe entirely.
+    // npm installs put only a `claude.cmd` shim on PATH, so refusing every
+    // batch launcher outright bricks those installs. The shim only stands
+    // for the package's own launch target — resolve that from npm's install
+    // layout and spawn it directly, which keeps arguments away from cmd.exe
+    // entirely.
     final shim = resolveWindowsCmdShim(executable, environment);
     if (shim != null) {
-      executable = shim.node;
-      scriptArguments = [shim.script];
+      executable = shim.executable;
+      scriptArguments = shim.arguments;
     }
   }
   rejectWindowsBatchCli(executable, windows: windows);
@@ -155,35 +155,45 @@ bool isWindowsBatchLauncher(String executable) {
   return normalized.endsWith('.cmd') || normalized.endsWith('.bat');
 }
 
-/// A `.cmd` shim resolved to a direct `node <script>` launch.
-typedef ResolvedCmdShim = ({String node, String script});
+/// A `.cmd` shim resolved to what it actually launches: an executable plus
+/// any leading arguments (a `cli.js` path when the target is a Node script).
+typedef ResolvedCmdShim = ({String executable, List<String> arguments});
 
-/// Node script targets a `claude` batch shim stands for, relative to the
-/// shim's own directory. npm's global layout puts the package beside its bin
-/// shims, so this is a documented location — parsing the generated .cmd
-/// itself would mean guessing at cmd-shim's implementation details, which
-/// are free to change between npm versions.
-const List<List<String>> _claudeShimScriptLayouts = [
+/// Launch targets a `claude` batch shim stands for, relative to the shim's
+/// own directory, most specific first. npm's global layout puts the package
+/// beside its bin shims, so these are documented locations — parsing the
+/// generated .cmd itself would mean guessing at cmd-shim's implementation
+/// details, which are free to change between npm versions.
+///
+/// Every published Claude Code inspected (2.1.236 through 2.1.247) wraps a
+/// native `bin/claude.exe`; the `cli.js` entry covers a genuinely
+/// script-based package.
+const List<List<String>> _claudeShimTargets = [
+  ['node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'],
   ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
 ];
 
-/// Resolves an npm-style `claude.cmd` shim to the Node script it stands for,
-/// so the CLI can be spawned as `node <cli.js>` without cmd.exe in the
-/// middle. Resolution is by npm's install layout (existence checks only, the
-/// shim's content is never read). Returns null when no known layout matches
-/// or no `node.exe` can be found — the caller then falls back to
+/// Resolves an npm-style `claude.cmd` shim to what it stands for — the
+/// package's native `bin/claude.exe`, or `node <cli.js>` — so the CLI can be
+/// spawned without cmd.exe in the middle. Resolution is by npm's install
+/// layout (existence checks only, the shim's content is never read). Returns
+/// null when no known layout matches, or the target is a script and no
+/// `node.exe` can be found — the caller then falls back to
 /// [rejectWindowsBatchCli].
 ResolvedCmdShim? resolveWindowsCmdShim(
   String executable,
   Map<String, String> environment,
 ) {
   final shimDirectory = p.dirname(executable);
-  for (final layout in _claudeShimScriptLayouts) {
-    final script = p.joinAll([shimDirectory, ...layout]);
-    if (!File(script).existsSync()) continue;
+  for (final target in _claudeShimTargets) {
+    final resolved = p.joinAll([shimDirectory, ...target]);
+    if (!File(resolved).existsSync()) continue;
+    if (resolved.toLowerCase().endsWith('.exe')) {
+      return (executable: resolved, arguments: const <String>[]);
+    }
     final node = _findNodeForShim(shimDirectory, environment);
     if (node == null) return null;
-    return (node: node, script: script);
+    return (executable: node, arguments: [resolved]);
   }
   return null;
 }

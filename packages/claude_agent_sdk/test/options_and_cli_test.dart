@@ -291,15 +291,36 @@ void main() {
       );
     });
 
-    test('resolves an npm .cmd shim to a direct node launch', () async {
+    test('resolves an npm .cmd shim to its packaged claude.exe', () async {
+      final temporary = Directory.systemTemp.createTempSync('claude-shim-');
+      addTearDown(() => temporary.deleteSync(recursive: true));
+      // The layout every published Claude Code npm package ships: the shim
+      // wraps a native exe inside the package (verified on 2.1.236-2.1.247).
+      final exe = File(
+        '${temporary.path}/node_modules/@anthropic-ai/claude-code/bin/'
+        'claude.exe',
+      )..createSync(recursive: true);
+      // Resolution is by npm's install layout — the shim's content is never
+      // read (cmd-shim's generated script is an implementation detail).
+      final shim = File('${temporary.path}/claude.cmd')
+        ..writeAsStringSync('@ECHO off\r\n');
+
+      final plan = await createCliLaunchPlan(
+        ClaudeAgentOptions(cliPath: shim.path),
+        parentEnvironment: const {},
+        isWindows: true,
+      );
+      expect(plan.executable, exe.path);
+      expect(plan.arguments.first, '--output-format');
+    });
+
+    test('resolves a script-based .cmd shim to a direct node launch', () async {
       final temporary = Directory.systemTemp.createTempSync('claude-shim-');
       addTearDown(() => temporary.deleteSync(recursive: true));
       final script = File(
         '${temporary.path}/node_modules/@anthropic-ai/claude-code/cli.js',
       )..createSync(recursive: true);
       final node = File('${temporary.path}/node.exe')..writeAsStringSync('');
-      // Resolution is by npm's install layout — the shim's content is never
-      // read (cmd-shim's generated script is an implementation detail).
       final shim = File('${temporary.path}/claude.cmd')
         ..writeAsStringSync('@ECHO off\r\n');
 
@@ -311,6 +332,28 @@ void main() {
       expect(plan.executable, node.path);
       expect(plan.arguments.first, script.path);
       expect(plan.arguments, contains('--input-format'));
+    });
+
+    test('prefers the packaged exe over a cli.js beside it', () async {
+      final temporary = Directory.systemTemp.createTempSync('claude-shim-');
+      addTearDown(() => temporary.deleteSync(recursive: true));
+      final exe = File(
+        '${temporary.path}/node_modules/@anthropic-ai/claude-code/bin/'
+        'claude.exe',
+      )..createSync(recursive: true);
+      File(
+        '${temporary.path}/node_modules/@anthropic-ai/claude-code/cli.js',
+      ).createSync(recursive: true);
+      File('${temporary.path}/node.exe').writeAsStringSync('');
+      final shim = File('${temporary.path}/claude.cmd')
+        ..writeAsStringSync('@ECHO off\r\n');
+
+      final plan = await createCliLaunchPlan(
+        ClaudeAgentOptions(cliPath: shim.path),
+        parentEnvironment: const {},
+        isWindows: true,
+      );
+      expect(plan.executable, exe.path);
     });
 
     test('finds the shim node.exe on PATH when none sits beside it', () async {
