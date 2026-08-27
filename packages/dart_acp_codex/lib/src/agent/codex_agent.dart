@@ -1296,10 +1296,14 @@ final class CodexAgent {
       await _backend
           .request('config/mcpServer/reload')
           .timeout(const Duration(seconds: 5));
-      // Give the respawn a moment to connect, so the turn's first call finds
-      // it up rather than racing the handshake.
-      for (var attempt = 0; attempt < 10; attempt++) {
-        await Future<void>.delayed(const Duration(milliseconds: 250));
+      // Give the respawn time to connect, so the turn's first call finds it
+      // up rather than racing the handshake. Bounded at ~9s but exits the
+      // moment the fleet reports healthy — a real server (the FlutterFlow one
+      // initializes an SDK on boot) can need several seconds, and a first
+      // call that works is worth a short wait on a turn that would otherwise
+      // open with failures.
+      for (var attempt = 0; attempt < 30; attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
         if (!await _anyMcpServerFailed(state)) {
           return;
         }
