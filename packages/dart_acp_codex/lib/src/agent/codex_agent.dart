@@ -1269,6 +1269,52 @@ final class CodexAgent {
     _completeTurn(state, StopReason.cancelled, turn);
   }
 
+  /// When the last MCP server reload was requested, so a burst of failing
+  /// calls (the model retrying, several tools on the same dead server) asks
+  /// for one restart rather than one per failure.
+  DateTime? _lastMcpReloadAt;
+
+  /// Restarts the app server's MCP servers when a tool call dies on a closed
+  /// transport, so the very next attempt reconnects instead of every later
+  /// call failing instantly for the rest of the session.
+  ///
+  /// Codex does not do this itself — killed a server mid-session on codex
+  /// 0.150 and every subsequent call failed with "Transport closed" until
+  /// `config/mcpServer/reload` (parameterless, global) was requested, after
+  /// which the same tool answered from a freshly spawned process. The reload
+  /// covers session-provided servers, not just config.toml ones: the respawn
+  /// was observed with a server passed in the thread's own config.
+  void _healClosedMcpTransport(CodexNotification notification) {
+    if (notification.method != 'item/completed') {
+      return;
+    }
+    final item = notification.params.optionalObject('item');
+    if (item == null ||
+        item.optionalString('type') != 'mcpToolCall' ||
+        item.optionalString('status') != 'failed') {
+      return;
+    }
+    final error = item['error'];
+    final message = error is Map<Object?, Object?>
+        ? error['message']?.toString()
+        : error?.toString();
+    if (message == null ||
+        !message.toLowerCase().contains('transport closed')) {
+      return;
+    }
+    final now = DateTime.now();
+    if (_lastMcpReloadAt case final last?
+        when now.difference(last) < const Duration(seconds: 20)) {
+      return;
+    }
+    _lastMcpReloadAt = now;
+    unawaited(
+      _backend
+          .request('config/mcpServer/reload')
+          .then<void>((_) {}, onError: (Object _) {}),
+    );
+  }
+
   void _handleNotification(CodexNotification notification) {
     final threadId = notification.threadId;
     if (threadId == null &&
@@ -1292,6 +1338,7 @@ final class CodexAgent {
         state.activeTurn = CodexTurnId(id);
       }
     }
+    _healClosedMcpTransport(notification);
     if (notification.method == 'turn/completed') {
       final turn = notification.params.optionalObject('turn');
       final id = turn?.optionalString('id') ?? notification.turnId?.value;

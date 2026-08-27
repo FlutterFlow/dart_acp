@@ -132,6 +132,7 @@ ContentBlock _text(String value) => ContentBlockText(TextContent(text: value));
 Future<void> _flush() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  _mcpHealTests();
   test('initializes, authenticates, and configures providers', () async {
     final harness = await _connect(
       options: CodexAdapterOptions(
@@ -1429,4 +1430,66 @@ void main() {
       expect((await resumedTurn).stopReason, StopReason.endTurn);
     },
   );
+}
+
+/// A closed MCP transport must trigger a server reload, so the model's next
+/// attempt reconnects instead of every later call failing for the rest of the
+/// session. Probed on codex 0.150: the CLI never restarts a dead server on
+/// its own, and the parameterless `config/mcpServer/reload` respawns
+/// session-provided servers too.
+void _mcpHealTests() {
+  test('a transport-closed MCP failure asks for one server reload', () async {
+    final harness = await _connect();
+    addTearDown(harness.close);
+    final created = await harness.pair.client.agent.createSession(
+      NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+    );
+    final sessionId = created.sessionId;
+    await _flush();
+
+    Map<String, Object?> failedCall(String id, String message) =>
+        <String, Object?>{
+          'item': <String, Object?>{
+            'id': id,
+            'type': 'mcpToolCall',
+            'server': 'flutterflow_ai',
+            'tool': 'screenshot_canvas',
+            'status': 'failed',
+            'error': <String, Object?>{
+              'message':
+                  'tool call error: tool call failed for '
+                  '`flutterflow_ai/screenshot_canvas`\n\nCaused by:\n    '
+                  '$message',
+            },
+          },
+        };
+
+    harness.backend.emit(
+      'item/completed',
+      failedCall('item-1', 'Transport closed'),
+      threadId: sessionId.value,
+    );
+    await _flush();
+    expect(harness.backend.count('config/mcpServer/reload'), 1);
+
+    // A burst of failures on the same dead server is one restart, not one per
+    // failing call.
+    harness.backend.emit(
+      'item/completed',
+      failedCall('item-2', 'Transport closed'),
+      threadId: sessionId.value,
+    );
+    await _flush();
+    expect(harness.backend.count('config/mcpServer/reload'), 1);
+
+    // Ordinary tool failures are not transport deaths and must not restart
+    // anything.
+    harness.backend.emit(
+      'item/completed',
+      failedCall('item-3', 'screen not found'),
+      threadId: sessionId.value,
+    );
+    await _flush();
+    expect(harness.backend.count('config/mcpServer/reload'), 1);
+  });
 }
