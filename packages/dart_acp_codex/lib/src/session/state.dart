@@ -92,6 +92,22 @@ final class CodexSessionState {
   /// Current generation used to fence stale asynchronous work.
   int generation = 0;
 
+  /// Installs a fresh [turnCompletion] whose failure cannot escape to the
+  /// zone, and returns it.
+  ///
+  /// A turn can be failed — a dead app server, a stream error — before
+  /// anything awaits it, and a steering turn is never awaited at all: the
+  /// completer erred with no listener reports an unhandled error and, in a
+  /// host app, that surfaces as a turn that never settles. Marking the future
+  /// ignorable at creation absorbs exactly that case; a real `await` still
+  /// receives the error.
+  Completer<StopReason> beginTurn() {
+    final completer = Completer<StopReason>();
+    completer.future.ignore();
+    turnCompletion = completer;
+    return completer;
+  }
+
   /// Queues one notification operation in event order.
   void enqueueNotification(Future<void> Function() operation) {
     notificationTail = notificationTail.then(

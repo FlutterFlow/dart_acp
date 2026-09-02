@@ -82,6 +82,15 @@ final class CodexAgent {
       capabilityExtensions: AcpJsonObject.fromObject(<String, Object?>{
         'providers': <String, Object?>{},
       }),
+      // The adapter runs in the client's own process (see [CodexAcpClient]),
+      // so there is no trust boundary to hide behind: a handler exception
+      // surfaced as a bare "Internal error" is a failed turn nobody can
+      // diagnose. Details ride in the error's `data`.
+      options: const AcpApplicationOptions(
+        jsonRpcOptions: JsonRpcConnectionOptions(
+          exposeInternalErrorDetails: true,
+        ),
+      ),
     );
     final unstableApp = unstable.AcpV1UnstableAgentApp(
       baseApp,
@@ -136,6 +145,9 @@ final class CodexAgent {
   // ignore: cancel_subscriptions
   StreamSubscription<CodexPendingServerRequest>? _requestSubscription;
   bool _terminalOutput = false;
+  // Set once the app-server streams end: the process behind every session in
+  // this adapter is gone, and nothing can run on it again.
+  bool _backendGone = false;
 
   /// Immutable typed ACP application.
   late final AcpAgentApp app;
@@ -194,10 +206,12 @@ final class CodexAgent {
     _notificationSubscription ??= _backend.notifications.listen(
       _handleNotification,
       onError: _handleBackendError,
+      onDone: _handleBackendClosed,
     );
     _requestSubscription ??= _backend.requests.listen(
       _handleServerRequest,
       onError: _handleBackendError,
+      onDone: _handleBackendClosed,
     );
     await _ensureInitialized();
   }
@@ -1016,8 +1030,7 @@ final class CodexAgent {
             : await completion.future,
       );
     }
-    final completer = Completer<StopReason>();
-    state.turnCompletion = completer;
+    final completer = state.beginTurn();
     final generation = state.generation;
     try {
       final response = await _backend.request(
@@ -1071,6 +1084,13 @@ final class CodexAgent {
       state
         ..activeTurn = null
         ..turnCompletion = null;
+      // An app server that dies while `turn/start` is in flight fails the
+      // request with a transport error that says nothing about the session.
+      // Answer with the death instead, so the client replaces the session
+      // rather than sending the next prompt to a process that is gone.
+      if (_backendGone) {
+        throw _deadBackendError('The Codex app server exited mid-turn.');
+      }
       rethrow;
     }
   }
@@ -1197,11 +1217,10 @@ final class CodexAgent {
               : 'auto',
         }),
       );
-      state
-        ..activeTurn = CodexTurnId(
-          response.requireObject('turn').requireString('id'),
-        )
-        ..turnCompletion = Completer<StopReason>();
+      state.activeTurn = CodexTurnId(
+        response.requireObject('turn').requireString('id'),
+      );
+      state.beginTurn();
       return const CodexSteeringStartedNewTurn();
     } on Object {
       return const CodexSteeringFailed();
@@ -1627,14 +1646,74 @@ final class CodexAgent {
     for (final state in _sessions.values) {
       final completer = state.turnCompletion;
       if (completer != null && !completer.isCompleted) {
-        completer.completeError(error, stackTrace);
+        // The raw error reaches the client as a bare "Internal error" — it is
+        // not a JsonRpcRequestException, so the mapper drops it. Name the
+        // cause. The stream itself is broadcast and stays open, so this does
+        // NOT claim the session is dead; only [_handleBackendClosed] does.
+        completer.completeError(
+          JsonRpcRequestException.internalError(
+            data: <String, Object?>{
+              'message': 'The Codex app-server stream failed: $error',
+            },
+          ),
+          stackTrace,
+        );
       }
     }
   }
 
+  /// The app-server streams ended: its process exited, or the transport under
+  /// it died. Sessions are retired HERE, not just their in-flight turns — a
+  /// session left open over a dead app server accepts later prompts and drops
+  /// them, with nothing telling the client its backend no longer exists.
+  /// `sessionDead` in the error data is what lets a client retire its handle
+  /// and start a replacement on the same conversation.
+  void _handleBackendClosed() {
+    if (_backendGone) {
+      return;
+    }
+    _backendGone = true;
+    options.onDiagnostic?.call(
+      const CodexDiagnostic(
+        level: CodexDiagnosticLevel.error,
+        category: CodexDiagnosticCategory.protocol,
+        message: 'The Codex app-server connection closed.',
+      ),
+    );
+    for (final state in _sessions.values) {
+      final completer = state.turnCompletion;
+      state
+        ..isClosed = true
+        ..generation += 1
+        ..activeTurn = null
+        ..turnCompletion = null;
+      if (completer != null && !completer.isCompleted) {
+        completer.completeError(
+          _deadBackendError('The Codex app server exited mid-turn.'),
+        );
+      }
+    }
+  }
+
+  JsonRpcRequestException _deadBackendError(String reason) =>
+      JsonRpcRequestException.internalError(
+        data: <String, Object?>{
+          'message': '$reason Start a new session.',
+          'sessionDead': true,
+        },
+      );
+
   CodexSessionState _requireSession(SessionId id) {
     final state = _sessions[id];
     if (state == null || state.isClosed) {
+      // A dead app server makes every session unusable, not merely unknown.
+      // Answering "invalid params" reads as a client bug and offers nothing to
+      // recover from; `sessionDead` tells the client to replace the session.
+      if (_backendGone) {
+        throw _deadBackendError(
+          'The Codex app server behind this session has exited.',
+        );
+      }
       throw JsonRpcRequestException.invalidParams(
         data: <String, Object?>{'sessionId': id.value},
       );
