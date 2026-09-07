@@ -112,6 +112,9 @@ final class ExampleCodexBackend implements CodexBackend {
   void markTurnStale(CodexThreadId threadId, CodexTurnId turnId) {}
 
   @override
+  bool get isClosed => _notifications.isClosed;
+
+  @override
   Future<void> close() async {
     await _notifications.close();
     await _requests.close();

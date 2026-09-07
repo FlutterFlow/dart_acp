@@ -43,6 +43,8 @@ final class FakeCodexBackend implements CodexBackend {
 
   var _threadCounter = 0;
   var _turnCounter = 0;
+
+  @override
   bool isClosed = false;
 
   @override

@@ -145,6 +145,15 @@ abstract interface class CodexBackend {
     CodexJsonObject params = CodexJsonObject.empty,
   });
 
+  /// Whether the backend can no longer serve calls.
+  ///
+  /// True as soon as the underlying connection is closed — including a close
+  /// the app server started by reaching EOF — and it flips BEFORE the pending
+  /// requests that close rejects. A caller whose request just failed can
+  /// therefore tell "the app server is gone" from an ordinary failure without
+  /// waiting for [notifications] to finish, which happens strictly later.
+  bool get isClosed;
+
   /// Marks a completed/interrupted turn stale for future routing.
   void markTurnStale(CodexThreadId threadId, CodexTurnId turnId);
 

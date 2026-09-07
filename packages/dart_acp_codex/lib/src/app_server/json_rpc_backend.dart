@@ -45,6 +45,9 @@ final class CodexJsonRpcBackend implements CodexBackend {
   Stream<CodexPendingServerRequest> get requests => _requests.stream;
 
   @override
+  bool get isClosed => _connection.isClosed;
+
+  @override
   Future<CodexJsonObject> request(
     String method, {
     CodexJsonObject params = CodexJsonObject.empty,

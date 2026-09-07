@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:dart_acp_codex/dart_acp_codex.dart';
+import 'package:dart_acp_codex/src/app_server/json_rpc_backend.dart';
 import 'package:test/test.dart';
 
 import 'helpers/fake_backend.dart';
@@ -33,7 +36,125 @@ _startSession({void Function(FakeCodexBackend backend)? configure}) async {
   return (client: client, backend: backend, session: created.sessionId);
 }
 
+/// A minimal app server over the real [CodexJsonRpcBackend] transport.
+///
+/// The fake backend can only close its streams, which models a crash that
+/// lands between requests. A real crash usually lands *during* one — the
+/// process reaches EOF while `turn/start` is still awaiting its response —
+/// and the connection rejects that request before any stream is done. Only a
+/// real transport can reproduce that ordering.
+final class _FakeAppServer {
+  _FakeAppServer(this._peer) {
+    _subscription = _peer.readable.listen(_handle);
+  }
+
+  final AcpDuplexStream<Object?> _peer;
+  late final StreamSubscription<Object?> _subscription;
+  final Completer<void> _sawTurnStart = Completer<void>();
+
+  /// Completes when `turn/start` has arrived and been deliberately left
+  /// unanswered.
+  Future<void> get pendingTurnStart => _sawTurnStart.future;
+
+  void _handle(Object? message) {
+    if (message is! Map<Object?, Object?>) {
+      return;
+    }
+    final id = message['id'];
+    final method = message['method'];
+    if (id == null || method is! String) {
+      return;
+    }
+    if (method == 'turn/start') {
+      // Answer nothing: the process is about to die with this in flight.
+      if (!_sawTurnStart.isCompleted) {
+        _sawTurnStart.complete();
+      }
+      return;
+    }
+    unawaited(
+      _peer.writable.write(<String, Object?>{
+        'id': id,
+        'result': _result(method),
+      }),
+    );
+  }
+
+  Map<String, Object?> _result(String method) => switch (method) {
+    'initialize' => <String, Object?>{'codexHome': '/tmp/codex-home'},
+    'model/list' => <String, Object?>{
+      'data': <Object?>[
+        <String, Object?>{
+          'id': 'gpt-test',
+          'displayName': 'GPT Test',
+          'description': 'Deterministic fake model',
+          'isDefault': true,
+          'defaultReasoningEffort': 'medium',
+          'supportedReasoningEfforts': <Object?>[
+            <String, Object?>{'reasoningEffort': 'medium'},
+          ],
+          'inputModalities': <Object?>['text'],
+          'contextWindow': 128000,
+        },
+      ],
+      'nextCursor': null,
+    },
+    'thread/start' => <String, Object?>{
+      'thread': <String, Object?>{'id': 'thread-1'},
+      'cwd': '/workspace',
+      'model': 'gpt-test',
+      'reasoningEffort': 'medium',
+      'sandbox': <String, Object?>{'type': 'workspaceWrite'},
+    },
+    'skills/list' => <String, Object?>{'data': <Object?>[]},
+    'mcpServerStatus/list' => <String, Object?>{'data': <Object?>[]},
+    _ => <String, Object?>{},
+  };
+
+  /// Reaches EOF, the way an app-server process exiting does.
+  Future<void> crash() => _peer.writable.close();
+
+  Future<void> dispose() => _subscription.cancel();
+}
+
 void main() {
+  test('a crash while turn/start is pending fails the FIRST prompt as a dead '
+      'session', () async {
+    final pair = acpInProcessTransportPair<Object?>();
+    final server = _FakeAppServer(pair.right);
+    addTearDown(server.dispose);
+    final backend = CodexJsonRpcBackend.connect(pair.left);
+    final agent = CodexAgent(
+      backend: backend,
+      options: CodexAdapterOptions(environment: const <String, String>{}),
+    );
+    final connection = await AcpClientApp.v1(
+      implementation: Implementation(name: 'test-client', version: '1.0.0'),
+      capabilities: ClientCapabilities(
+        fs: FileSystemCapabilities(readTextFile: false, writeTextFile: false),
+        terminal: false,
+      ),
+    ).connectWith(agent.app);
+    addTearDown(connection.close);
+    await agent.initialized;
+    final created = await connection.client.agent.createSession(
+      NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+    );
+
+    final turn = connection.client.agent.sendPrompt(
+      PromptRequest(
+        sessionId: created.sessionId,
+        prompt: <ContentBlock>[_text('hello')],
+      ),
+    );
+    await server.pendingTurnStart;
+    await server.crash();
+
+    // The point of the test: the FIRST prompt carries the marker, so the
+    // client replaces the session without also discarding a second message.
+    await expectLater(turn, throwsA(_isDeadSession));
+  });
+
   test('an app server that dies mid-turn fails the turn as a dead '
       'session', () async {
     final started = await _startSession();

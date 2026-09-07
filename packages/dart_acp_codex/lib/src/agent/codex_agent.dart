@@ -1088,7 +1088,15 @@ final class CodexAgent {
       // request with a transport error that says nothing about the session.
       // Answer with the death instead, so the client replaces the session
       // rather than sending the next prompt to a process that is gone.
-      if (_backendGone) {
+      //
+      // `_backendGone` alone is too late here: the connection rejects this
+      // request before the streams whose `onDone` sets that flag are closed,
+      // so the FIRST prompt after a crash would fail as an opaque
+      // "JSON-RPC connection closed" and only the SECOND would carry the
+      // marker — costing the user a message. The backend's own closed state
+      // flips before that rejection, so ask it directly.
+      if (_backendGone || _backend.isClosed) {
+        _handleBackendClosed();
         throw _deadBackendError('The Codex app server exited mid-turn.');
       }
       rethrow;
@@ -1709,7 +1717,9 @@ final class CodexAgent {
       // A dead app server makes every session unusable, not merely unknown.
       // Answering "invalid params" reads as a client bug and offers nothing to
       // recover from; `sessionDead` tells the client to replace the session.
-      if (_backendGone) {
+      // The backend is asked as well as the flag: a prompt can arrive after
+      // the connection closed but before the streams' `onDone` has run.
+      if (_backendGone || _backend.isClosed) {
         throw _deadBackendError(
           'The Codex app server behind this session has exited.',
         );
