@@ -86,8 +86,16 @@ final class CodexAgent {
       // so there is no trust boundary to hide behind: a handler exception
       // surfaced as a bare "Internal error" is a failed turn nobody can
       // diagnose. Details ride in the error's `data`.
+      //
+      // `allowBatches: false` is repeated deliberately, not inherited:
+      // [AcpApplicationOptions] defaults this whole object to
+      // `JsonRpcConnectionOptions(allowBatches: false)`, while
+      // [JsonRpcConnectionOptions] itself defaults the flag to true — so
+      // naming any option here would silently turn batching back on, and
+      // stable v1 keeps rejecting batches.
       options: const AcpApplicationOptions(
         jsonRpcOptions: JsonRpcConnectionOptions(
+          allowBatches: false,
           exposeInternalErrorDetails: true,
         ),
       ),
@@ -1015,14 +1023,25 @@ final class CodexAgent {
       titleHint: titleMetadata?[codexThreadTitlePromptMetaKey]?.toObject(),
     );
     if (state.activeTurn case final activeTurn?) {
-      await _backend.request(
-        'turn/steer',
-        params: CodexJsonObject.from(<String, Object?>{
-          'threadId': state.sessionId.value,
-          'expectedTurnId': activeTurn.value,
-          'input': _promptMapper.map(prompt),
-        }),
-      );
+      // A steered prompt needs the same closure translation as a started one:
+      // the panel deliberately lets a follow-up join a running turn, so this
+      // is a normal path, and an app server dying while `turn/steer` is
+      // pending would otherwise surface a bare transport error.
+      try {
+        await _backend.request(
+          'turn/steer',
+          params: CodexJsonObject.from(<String, Object?>{
+            'threadId': state.sessionId.value,
+            'expectedTurnId': activeTurn.value,
+            'input': _promptMapper.map(prompt),
+          }),
+        );
+      } on Object {
+        if (_deathIfBackendGone() case final death?) {
+          throw death;
+        }
+        rethrow;
+      }
       final completion = state.turnCompletion;
       return PromptResponse(
         stopReason: completion == null
@@ -1084,23 +1103,32 @@ final class CodexAgent {
       state
         ..activeTurn = null
         ..turnCompletion = null;
-      // An app server that dies while `turn/start` is in flight fails the
-      // request with a transport error that says nothing about the session.
-      // Answer with the death instead, so the client replaces the session
-      // rather than sending the next prompt to a process that is gone.
-      //
-      // `_backendGone` alone is too late here: the connection rejects this
-      // request before the streams whose `onDone` sets that flag are closed,
-      // so the FIRST prompt after a crash would fail as an opaque
-      // "JSON-RPC connection closed" and only the SECOND would carry the
-      // marker — costing the user a message. The backend's own closed state
-      // flips before that rejection, so ask it directly.
-      if (_backendGone || _backend.isClosed) {
-        _handleBackendClosed();
-        throw _deadBackendError('The Codex app server exited mid-turn.');
+      if (_deathIfBackendGone() case final death?) {
+        throw death;
       }
       rethrow;
     }
+  }
+
+  /// The session's death when the app server is gone, else null.
+  ///
+  /// An app server that dies while a request is in flight fails it with a
+  /// transport error that says nothing about the session. Answering with the
+  /// death instead is what makes the client replace the session rather than
+  /// send the next prompt to a process that is gone.
+  ///
+  /// [_backendGone] alone is too late: the connection rejects the pending
+  /// request BEFORE the streams whose `onDone` sets that flag are closed, so
+  /// the FIRST prompt after a crash would fail as an opaque "JSON-RPC
+  /// connection closed" and only the SECOND would carry the marker — costing
+  /// the user a message. The backend's own closed state flips before that
+  /// rejection, so it is asked directly.
+  JsonRpcRequestException? _deathIfBackendGone() {
+    if (!_backendGone && !_backend.isClosed) {
+      return null;
+    }
+    _handleBackendClosed();
+    return _deadBackendError('The Codex app server exited mid-turn.');
   }
 
   Future<void> _maybeSetInitialThreadName(

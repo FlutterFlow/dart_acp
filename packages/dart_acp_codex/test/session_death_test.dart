@@ -44,17 +44,27 @@ _startSession({void Function(FakeCodexBackend backend)? configure}) async {
 /// and the connection rejects that request before any stream is done. Only a
 /// real transport can reproduce that ordering.
 final class _FakeAppServer {
-  _FakeAppServer(this._peer) {
+  _FakeAppServer(this._peer, {this.stallMethod = 'turn/start'}) {
     _subscription = _peer.readable.listen(_handle);
   }
 
   final AcpDuplexStream<Object?> _peer;
-  late final StreamSubscription<Object?> _subscription;
-  final Completer<void> _sawTurnStart = Completer<void>();
 
-  /// Completes when `turn/start` has arrived and been deliberately left
-  /// unanswered.
-  Future<void> get pendingTurnStart => _sawTurnStart.future;
+  /// The method left deliberately unanswered, so a crash can be timed while
+  /// that request is pending.
+  final String stallMethod;
+
+  late final StreamSubscription<Object?> _subscription;
+  final Completer<void> _sawStall = Completer<void>();
+
+  /// Completes when [stallMethod] has arrived and been left unanswered.
+  Future<void> get pendingStall => _sawStall.future;
+
+  final Map<String, Completer<void>> _waits = <String, Completer<void>>{};
+
+  /// Completes once [method] has been received.
+  Future<void> waitFor(String method) =>
+      _waits.putIfAbsent(method, Completer<void>.new).future;
 
   void _handle(Object? message) {
     if (message is! Map<Object?, Object?>) {
@@ -65,10 +75,14 @@ final class _FakeAppServer {
     if (id == null || method is! String) {
       return;
     }
-    if (method == 'turn/start') {
+    final wait = _waits.putIfAbsent(method, Completer<void>.new);
+    if (!wait.isCompleted) {
+      wait.complete();
+    }
+    if (method == stallMethod) {
       // Answer nothing: the process is about to die with this in flight.
-      if (!_sawTurnStart.isCompleted) {
-        _sawTurnStart.complete();
+      if (!_sawStall.isCompleted) {
+        _sawStall.complete();
       }
       return;
     }
@@ -106,6 +120,9 @@ final class _FakeAppServer {
       'reasoningEffort': 'medium',
       'sandbox': <String, Object?>{'type': 'workspaceWrite'},
     },
+    'turn/start' => <String, Object?>{
+      'turn': <String, Object?>{'id': 'turn-1'},
+    },
     'skills/list' => <String, Object?>{'data': <Object?>[]},
     'mcpServerStatus/list' => <String, Object?>{'data': <Object?>[]},
     _ => <String, Object?>{},
@@ -117,42 +134,94 @@ final class _FakeAppServer {
   Future<void> dispose() => _subscription.cancel();
 }
 
+Future<
+  ({
+    AcpDirectConnectionPair connection,
+    _FakeAppServer server,
+    SessionId session,
+  })
+>
+_startOverRealTransport({String stallMethod = 'turn/start'}) async {
+  final pair = acpInProcessTransportPair<Object?>();
+  final server = _FakeAppServer(pair.right, stallMethod: stallMethod);
+  addTearDown(server.dispose);
+  final agent = CodexAgent(
+    backend: CodexJsonRpcBackend.connect(pair.left),
+    options: CodexAdapterOptions(environment: const <String, String>{}),
+  );
+  final connection = await AcpClientApp.v1(
+    implementation: Implementation(name: 'test-client', version: '1.0.0'),
+    capabilities: ClientCapabilities(
+      fs: FileSystemCapabilities(readTextFile: false, writeTextFile: false),
+      terminal: false,
+    ),
+  ).connectWith(agent.app);
+  addTearDown(connection.close);
+  await agent.initialized;
+  final created = await connection.client.agent.createSession(
+    NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+  );
+  return (connection: connection, server: server, session: created.sessionId);
+}
+
 void main() {
+  test('the agent app keeps batches off while exposing error details', () {
+    // `AcpApplicationOptions` defaults this object to `allowBatches: false`
+    // but `JsonRpcConnectionOptions` defaults the flag to true, so naming any
+    // option without repeating this one silently re-enables batching.
+    final options = CodexAgent(
+      backend: FakeCodexBackend(),
+      options: CodexAdapterOptions(environment: const <String, String>{}),
+    ).app.options.jsonRpcOptions;
+
+    expect(options.allowBatches, isFalse);
+    expect(options.exposeInternalErrorDetails, isTrue);
+  });
+
   test('a crash while turn/start is pending fails the FIRST prompt as a dead '
       'session', () async {
-    final pair = acpInProcessTransportPair<Object?>();
-    final server = _FakeAppServer(pair.right);
-    addTearDown(server.dispose);
-    final backend = CodexJsonRpcBackend.connect(pair.left);
-    final agent = CodexAgent(
-      backend: backend,
-      options: CodexAdapterOptions(environment: const <String, String>{}),
-    );
-    final connection = await AcpClientApp.v1(
-      implementation: Implementation(name: 'test-client', version: '1.0.0'),
-      capabilities: ClientCapabilities(
-        fs: FileSystemCapabilities(readTextFile: false, writeTextFile: false),
-        terminal: false,
-      ),
-    ).connectWith(agent.app);
-    addTearDown(connection.close);
-    await agent.initialized;
-    final created = await connection.client.agent.createSession(
-      NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
-    );
+    final started = await _startOverRealTransport();
 
-    final turn = connection.client.agent.sendPrompt(
+    final turn = started.connection.client.agent.sendPrompt(
       PromptRequest(
-        sessionId: created.sessionId,
+        sessionId: started.session,
         prompt: <ContentBlock>[_text('hello')],
       ),
     );
-    await server.pendingTurnStart;
-    await server.crash();
+    await started.server.pendingStall;
+    await started.server.crash();
 
     // The point of the test: the FIRST prompt carries the marker, so the
     // client replaces the session without also discarding a second message.
     await expectLater(turn, throwsA(_isDeadSession));
+  });
+
+  test('a crash while turn/steer is pending is a dead session too', () async {
+    final started = await _startOverRealTransport(stallMethod: 'turn/steer');
+    // The first prompt starts a turn that never completes, which is what
+    // makes the follow-up steer rather than start — the panel deliberately
+    // lets a second message join a running turn.
+    final first = started.connection.client.agent.sendPrompt(
+      PromptRequest(
+        sessionId: started.session,
+        prompt: <ContentBlock>[_text('hello')],
+      ),
+    );
+    await started.server.waitFor('turn/start');
+    await _flush();
+    await _flush();
+
+    final steered = started.connection.client.agent.sendPrompt(
+      PromptRequest(
+        sessionId: started.session,
+        prompt: <ContentBlock>[_text('and also this')],
+      ),
+    );
+    await started.server.pendingStall;
+    await started.server.crash();
+
+    await expectLater(steered, throwsA(_isDeadSession));
+    await expectLater(first, throwsA(_isDeadSession));
   });
 
   test('an app server that dies mid-turn fails the turn as a dead '
