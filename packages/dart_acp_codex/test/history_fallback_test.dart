@@ -116,6 +116,37 @@ void main() {
     expect(updates.last.toJson()['toolCallId'], 'new');
   });
 
+  test('keeps a tool output over 1 MiB with the default bounds', () {
+    // Real rollouts carry outputs this large; the old 1 MiB line default
+    // dropped the record and left the recovered call without a result.
+    final output = 'x' * (2 * 1024 * 1024);
+    final contents = <Map<String, Object?>>[
+      <String, Object?>{
+        'type': 'function_call',
+        'call_id': 'call-large',
+        'name': 'exec_command',
+        'arguments': jsonEncode(<String, Object?>{'cmd': 'cat build.log'}),
+      },
+      <String, Object?>{
+        'type': 'function_call_output',
+        'call_id': 'call-large',
+        'output': output,
+      },
+    ].map(jsonEncode).join('\n');
+
+    final updates = const CodexResponseHistory().parse(contents)!;
+
+    expect(updates.map((update) => update.discriminator), <String>[
+      'tool_call',
+      'tool_call_update',
+    ]);
+    expect(
+      (updates.last.toJson()['rawOutput']
+          as Map<String, Object?>)['formatted_output'],
+      output,
+    );
+  });
+
   test('merges fallback chronology around structured duplicates', () {
     SessionUpdate text(String value) =>
         SessionUpdate.fromJson(<String, Object?>{

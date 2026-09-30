@@ -35,7 +35,10 @@ final class CodexRuntime {
         write: owned.writeInput,
         close: owned.closeInput,
       ),
-      options: const NdJsonStreamOptions(closeOutput: true),
+      options: NdJsonStreamOptions(
+        maximumLineBytes: resolved.maximumAppServerLineBytes,
+        closeOutput: true,
+      ),
     );
     late final CodexJsonRpcBackend processBackend;
     processBackend = CodexJsonRpcBackend.connect(

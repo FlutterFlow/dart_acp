@@ -37,6 +37,7 @@ Future<void> main(List<String> arguments) async {
             },
           ],
         },
+        'thread/resume' => _resumedThread(message['params']),
         _ => <String, Object?>{},
       };
       stdout.writeln(
@@ -48,6 +49,39 @@ Future<void> main(List<String> arguments) async {
     _log('$error\n$stackTrace');
     rethrow;
   }
+}
+
+/// A resumed thread whose one command printed `FAKE_CODEX_RESUME_OUTPUT_BYTES`
+/// bytes. Like a real `thread/resume`, the whole history is one response
+/// line, so its size tracks the output.
+Map<String, Object?> _resumedThread(Object? params) {
+  final outputBytes =
+      int.tryParse(
+        Platform.environment['FAKE_CODEX_RESUME_OUTPUT_BYTES'] ?? '',
+      ) ??
+      0;
+  return <String, Object?>{
+    'thread': <String, Object?>{
+      'id': params is Map<String, Object?> ? params['threadId'] : null,
+      'turns': <Object?>[
+        <String, Object?>{
+          'id': 'turn-1',
+          'items': <Object?>[
+            <String, Object?>{
+              'type': 'commandExecution',
+              'id': 'command-1',
+              'command': 'cat build.log',
+              'cwd': '/workspace',
+              'status': 'completed',
+              'exitCode': 0,
+              'aggregatedOutput': 'x' * outputBytes,
+            },
+          ],
+        },
+      ],
+    },
+    'model': 'fake-model',
+  };
 }
 
 void _log(String message) {

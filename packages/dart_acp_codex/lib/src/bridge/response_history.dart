@@ -10,7 +10,7 @@ final class CodexResponseHistory {
   /// Creates a history reader.
   const CodexResponseHistory({
     this.maximumFileBytes = 32 * 1024 * 1024,
-    this.maximumLineBytes = 1024 * 1024,
+    this.maximumLineBytes = 32 * 1024 * 1024,
     this.maximumRecords = 100000,
   });
 
@@ -18,6 +18,12 @@ final class CodexResponseHistory {
   final int maximumFileBytes;
 
   /// Maximum individual JSONL record size.
+  ///
+  /// Defaults to the same 32 MiB as [maximumFileBytes]. By the time lines are
+  /// split the whole file is already in memory, so a smaller cap saves nothing
+  /// and only drops records silently: real rollouts carry tool outputs over
+  /// 1 MiB (the old default), and dropping one left its recovered tool call
+  /// with no result.
   final int maximumLineBytes;
 
   /// Maximum number of lines inspected.

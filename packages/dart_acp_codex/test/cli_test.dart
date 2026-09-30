@@ -76,6 +76,7 @@ void main() {
           'CODEX_ACP_MODEL_PROVIDER': 'provider',
           'CODEX_ACP_SHUTDOWN_TIMEOUT_MS': '125',
           'CODEX_ACP_MAX_STDERR_CHARS': '512',
+          'CODEX_ACP_MAX_LINE_BYTES': '4096',
         },
         stdioRunner: (options) async {
           captured = options;
@@ -87,6 +88,7 @@ void main() {
       expect(captured?.modelProvider, 'provider');
       expect(captured?.shutdownTimeout, const Duration(milliseconds: 125));
       expect(captured?.maximumStderrTailCharacters, 512);
+      expect(captured?.maximumAppServerLineBytes, 4096);
 
       final errors = <String>[];
       expect(

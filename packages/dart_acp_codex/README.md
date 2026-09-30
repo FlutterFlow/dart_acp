@@ -93,8 +93,8 @@ provider discovery or included in diagnostics.
 
 `CodexAcpClientOptions` aliases `CodexAdapterOptions`; it controls the
 executable, base app-server configuration, model provider, environment,
-shutdown grace period, stderr bound, and diagnostic sink. The executable
-additionally recognizes:
+shutdown grace period, stderr bound, app-server message size bound, and
+diagnostic sink. The executable additionally recognizes:
 
 | Environment variable | Meaning |
 | --- | --- |
@@ -102,6 +102,7 @@ additionally recognizes:
 | `CODEX_ACP_MODEL_PROVIDER` | Preferred Codex model-provider id |
 | `CODEX_ACP_SHUTDOWN_TIMEOUT_MS` | Positive shutdown grace period in milliseconds |
 | `CODEX_ACP_MAX_STDERR_CHARS` | Positive maximum retained stderr tail |
+| `CODEX_ACP_MAX_LINE_BYTES` | Positive maximum bytes in one app-server message; defaults to 256 MiB |
 | `CODEX_API_KEY` / `OPENAI_API_KEY` | API-key fallback |
 | `NO_BROWSER` | Disable browser-backed ChatGPT authentication |
 
