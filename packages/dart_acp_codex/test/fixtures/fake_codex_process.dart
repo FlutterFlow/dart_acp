@@ -53,31 +53,34 @@ Future<void> main(List<String> arguments) async {
 
 /// A resumed thread whose one command printed `FAKE_CODEX_RESUME_OUTPUT_BYTES`
 /// bytes. Like a real `thread/resume`, the whole history is one response
-/// line, so its size tracks the output.
+/// line, so its size tracks the output, and `excludeTurns: true` leaves the
+/// turns out.
 Map<String, Object?> _resumedThread(Object? params) {
   final outputBytes =
       int.tryParse(
         Platform.environment['FAKE_CODEX_RESUME_OUTPUT_BYTES'] ?? '',
       ) ??
       0;
+  final request = params is Map<String, Object?> ? params : null;
   return <String, Object?>{
     'thread': <String, Object?>{
-      'id': params is Map<String, Object?> ? params['threadId'] : null,
+      'id': request?['threadId'],
       'turns': <Object?>[
-        <String, Object?>{
-          'id': 'turn-1',
-          'items': <Object?>[
-            <String, Object?>{
-              'type': 'commandExecution',
-              'id': 'command-1',
-              'command': 'cat build.log',
-              'cwd': '/workspace',
-              'status': 'completed',
-              'exitCode': 0,
-              'aggregatedOutput': 'x' * outputBytes,
-            },
-          ],
-        },
+        if (request?['excludeTurns'] != true)
+          <String, Object?>{
+            'id': 'turn-1',
+            'items': <Object?>[
+              <String, Object?>{
+                'type': 'commandExecution',
+                'id': 'command-1',
+                'command': 'cat build.log',
+                'cwd': '/workspace',
+                'status': 'completed',
+                'exitCode': 0,
+                'aggregatedOutput': 'x' * outputBytes,
+              },
+            ],
+          },
       ],
     },
     'model': 'fake-model',

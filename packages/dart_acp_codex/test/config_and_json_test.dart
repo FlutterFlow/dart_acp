@@ -69,6 +69,15 @@ void main() {
       );
     });
 
+    test('resume keeps asking for the turn history by default', () {
+      expect(
+        CodexAdapterOptions(
+          environment: const <String, String>{},
+        ).excludeTurnsOnResume,
+        isFalse,
+      );
+    });
+
     test('model selection parses the final effort component', () {
       final selection = CodexModelSelection.parse('gpt/custom/high');
       expect(selection.model, 'gpt/custom');

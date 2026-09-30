@@ -588,6 +588,7 @@ final class CodexAgent {
         cwd: cwd,
         additionalDirectories: additionalDirectories,
         mcpServers: mcpServers,
+        excludeTurns: options.excludeTurnsOnResume,
       )).$1;
     }
     await _ensureInitialized();
@@ -626,6 +627,7 @@ final class CodexAgent {
     required String cwd,
     required Iterable<String> additionalDirectories,
     required Iterable<McpServer> mcpServers,
+    bool excludeTurns = false,
   }) async {
     await _ensureInitialized();
     final response = await _backend.request(
@@ -635,6 +637,7 @@ final class CodexAgent {
         'cwd': cwd,
         'modelProvider': options.modelProvider ?? _gatewayProviderId,
         'config': _sessionConfig(mcpServers),
+        if (excludeTurns) 'excludeTurns': true,
       }),
     );
     try {

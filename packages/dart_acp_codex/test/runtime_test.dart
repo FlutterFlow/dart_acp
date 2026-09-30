@@ -190,6 +190,50 @@ void main() {
     );
   });
 
+  test('resumes without the history when excluding turns', () async {
+    // The same 2 MiB history that fails a 1 MiB cap above: excludeTurns keeps
+    // it off the wire for session/resume, while session/load, which replays
+    // it, still asks for it and still hits the cap.
+    final updates = <SessionNotification>[];
+    final agent = await _connectToFakeProcess(
+      CodexAdapterOptions(
+        executable: _fakeExecutable,
+        environment: _resumeEnvironment(2 * 1024 * 1024),
+        maximumAppServerLineBytes: 1024 * 1024,
+        excludeTurnsOnResume: true,
+      ),
+      updates,
+    );
+
+    await agent.resumeSession(
+      ResumeSessionRequest(sessionId: SessionId('resumed'), cwd: '/workspace'),
+    );
+    // The resumed session's initial updates end with its goal snapshot. Let
+    // them land before the failing load takes the connection down.
+    while (!updates.any(
+      (notification) =>
+          notification.update.discriminator == 'session_info_update',
+    )) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
+    await expectLater(
+      agent.loadSession(
+        LoadSessionRequest(
+          sessionId: SessionId('loaded'),
+          cwd: '/workspace',
+          mcpServers: const <McpServer>[],
+        ),
+      ),
+      throwsA(
+        isA<JsonRpcRequestException>().having(
+          (error) => '${error.data}',
+          'data',
+          contains('LineLengthExceededException'),
+        ),
+      ),
+    );
+  });
+
   test('kills an unresponsive owned process after the grace period', () async {
     final runtime = await CodexRuntime.start(
       options: CodexAdapterOptions(
