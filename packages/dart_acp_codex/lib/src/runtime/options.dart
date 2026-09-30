@@ -30,6 +30,7 @@ final class CodexAdapterOptions {
     this.defaultAuthentication,
     Map<String, String>? environment,
     this.workspaceWriteApprovalsReviewer = CodexApprovalsReviewer.user,
+    this.workspaceWriteNetworkAccess = false,
     this.shutdownTimeout = const Duration(seconds: 2),
     this.maximumStderrTailCharacters = 2048,
     this.mcpRevivePollInterval = const Duration(milliseconds: 300),
@@ -102,6 +103,17 @@ final class CodexAdapterOptions {
           collaborationMode == CodexCollaborationMode.standard
       ? workspaceWriteApprovalsReviewer
       : CodexApprovalsReviewer.user;
+
+  /// Whether commands in the workspace-write sandbox may reach the network.
+  ///
+  /// Sent as `networkAccess` in every workspace-write `turn/start` sandbox
+  /// policy, and as `sandbox_workspace_write.network_access` in the
+  /// `thread/start` and `thread/resume` config, so the thread and its turns
+  /// agree, overriding any `network_access` in [configuration]. Read-only and
+  /// full-access turns ignore it. Off by default, which leaves networked
+  /// commands (package managers, API calls) to fail inside the sandbox unless
+  /// an approval reruns them unsandboxed.
+  final bool workspaceWriteNetworkAccess;
 
   /// Graceful child shutdown timeout.
   final Duration shutdownTimeout;
