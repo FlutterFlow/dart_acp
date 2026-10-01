@@ -122,6 +122,17 @@ CodexAdapterOptions(
 Read-only and plan turns remain human-reviewed, and full-access turns retain
 their `never` approval policy.
 
+The workspace-write sandbox denies network access by default. Clients whose
+agents run networked tooling (package managers, API clients) can allow it:
+
+```dart
+CodexAdapterOptions(workspaceWriteNetworkAccess: true);
+```
+
+The value goes into every workspace-write `turn/start` sandbox policy and into
+the thread's `sandbox_workspace_write.network_access` config, so the thread and
+its turns agree. Read-only turns keep the network off.
+
 ## Providers and extensions
 
 The experimental ACP provider surface advertises one optional provider:

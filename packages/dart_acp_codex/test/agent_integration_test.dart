@@ -682,6 +682,155 @@ void main() {
     expect((await startAndComplete('plan work'))['approvalsReviewer'], 'user');
   });
 
+  group('workspace-write network access', () {
+    Future<CodexJsonObject> startAndComplete(
+      _Harness harness,
+      SessionId sessionId,
+    ) async {
+      final turnId = 'turn-${harness.backend.count('turn/start') + 1}';
+      final turn = harness.pair.client.agent.sendPrompt(
+        PromptRequest(
+          sessionId: sessionId,
+          prompt: <ContentBlock>[_text('go')],
+        ),
+      );
+      await _flush();
+      final params = harness.backend.lastCall('turn/start').params;
+      harness.backend.emit(
+        'turn/completed',
+        <String, Object?>{
+          'turn': <String, Object?>{'id': turnId, 'status': 'completed'},
+        },
+        threadId: sessionId.value,
+        turnId: turnId,
+      );
+      expect((await turn).stopReason, StopReason.endTurn);
+      return params;
+    }
+
+    Map<String, Object?> sandboxPolicy(CodexJsonObject turnParams) =>
+        turnParams.requireObject('sandboxPolicy').toJson();
+
+    Map<String, Object?> threadConfig(_Harness harness, String method) =>
+        harness.backend
+            .lastCall(method)
+            .params
+            .requireObject('config')
+            .toJson();
+
+    test('stays off by default, on the thread and on every turn', () async {
+      final harness = await _connect();
+      addTearDown(harness.close);
+      final created = await harness.pair.client.agent.createSession(
+        NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+      );
+
+      expect(
+        threadConfig(harness, 'thread/start'),
+        containsPair('sandbox_workspace_write.network_access', false),
+      );
+      expect(
+        sandboxPolicy(await startAndComplete(harness, created.sessionId)),
+        allOf(
+          containsPair('type', 'workspaceWrite'),
+          containsPair('networkAccess', false),
+        ),
+      );
+    });
+
+    test(
+      'reaches the thread and every workspace-write turn when enabled',
+      () async {
+        final harness = await _connect(
+          options: CodexAdapterOptions(
+            environment: const <String, String>{},
+            workspaceWriteNetworkAccess: true,
+          ),
+        );
+        addTearDown(harness.close);
+        final created = await harness.pair.client.agent.createSession(
+          NewSessionRequest(
+            cwd: '/workspace',
+            mcpServers: const <McpServer>[],
+            additionalDirectories: const <String>['/extra'],
+          ),
+        );
+        final sessionId = created.sessionId;
+
+        expect(
+          threadConfig(harness, 'thread/start'),
+          containsPair('sandbox_workspace_write.network_access', true),
+        );
+        expect(sandboxPolicy(await startAndComplete(harness, sessionId)), {
+          'type': 'workspaceWrite',
+          'writableRoots': <Object?>['/extra'],
+          'networkAccess': true,
+          'excludeTmpdirEnvVar': false,
+          'excludeSlashTmp': false,
+        });
+        expect(
+          sandboxPolicy(await startAndComplete(harness, sessionId)),
+          containsPair('networkAccess', true),
+        );
+
+        await harness.pair.client.agent.setSessionConfigOption(
+          _params(sessionSetConfigOptionMethod, <String, Object?>{
+            'sessionId': sessionId.value,
+            'configId': 'agent-mode',
+            'value': 'read-only',
+          }),
+        );
+        expect(sandboxPolicy(await startAndComplete(harness, sessionId)), {
+          'type': 'readOnly',
+          'networkAccess': false,
+        });
+
+        await harness.pair.client.agent.resumeSession(
+          ResumeSessionRequest(
+            sessionId: SessionId('resumed'),
+            cwd: '/workspace',
+          ),
+        );
+        expect(
+          threadConfig(harness, 'thread/resume'),
+          containsPair('sandbox_workspace_write.network_access', true),
+        );
+      },
+    );
+
+    test(
+      'goes inside a sandbox_workspace_write table from the configuration',
+      () async {
+        final harness = await _connect(
+          options: CodexAdapterOptions(
+            environment: const <String, String>{},
+            configuration: CodexJsonObject.from(<String, Object?>{
+              'sandbox_workspace_write': <String, Object?>{
+                'writable_roots': <Object?>['/cache'],
+                'network_access': false,
+              },
+            }),
+            workspaceWriteNetworkAccess: true,
+          ),
+        );
+        addTearDown(harness.close);
+        await harness.pair.client.agent.createSession(
+          NewSessionRequest(cwd: '/workspace', mcpServers: const <McpServer>[]),
+        );
+
+        final config = threadConfig(harness, 'thread/start');
+        expect(config['sandbox_workspace_write'], {
+          'writable_roots': <Object?>['/cache'],
+          'network_access': true,
+        });
+        expect(
+          config.containsKey('sandbox_workspace_write.network_access'),
+          isFalse,
+        );
+      },
+    );
+  });
+
   test('bridges approvals, elicitations, steering, and goals', () async {
     final harness = await _connect(
       elicitationContent: const <String, Object?>{

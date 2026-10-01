@@ -727,6 +727,7 @@ final class CodexAgent {
 
   Map<String, Object?> _sessionConfig(Iterable<McpServer> mcpServers) {
     final config = <String, Object?>{...options.configuration.toJson()};
+    _setWorkspaceWriteNetworkAccess(config);
     final mapped = _mcpMapper.map(mcpServers);
     if (mapped.isNotEmpty) {
       config['mcp_servers'] = mapped;
@@ -745,6 +746,26 @@ final class CodexAgent {
         };
     }
     return config;
+  }
+
+  /// Gives the thread the same workspace-write network access that every
+  /// `turn/start` sandbox policy sends.
+  ///
+  /// App-server applies each config key as its own override, and a
+  /// `sandbox_workspace_write` table replaces the whole table. A dotted key
+  /// beside that table can be lost, so when the base configuration has one,
+  /// the value goes inside it.
+  void _setWorkspaceWriteNetworkAccess(Map<String, Object?> config) {
+    const table = 'sandbox_workspace_write';
+    final networkAccess = options.workspaceWriteNetworkAccess;
+    if (config[table] case final Map<String, Object?> existing) {
+      config[table] = <String, Object?>{
+        ...existing,
+        'network_access': networkAccess,
+      };
+    } else {
+      config['$table.network_access'] = networkAccess;
+    }
   }
 
   String? get _gatewayProviderId =>
@@ -1178,7 +1199,7 @@ final class CodexAgent {
       CodexAgentMode.workspaceWrite => <String, Object?>{
         'type': 'workspaceWrite',
         'writableRoots': state.additionalDirectories,
-        'networkAccess': false,
+        'networkAccess': options.workspaceWriteNetworkAccess,
         'excludeTmpdirEnvVar': false,
         'excludeSlashTmp': false,
       },
