@@ -117,6 +117,11 @@ CodexAdapterOptions _optionsFromEnvironment(Map<String, String> environment) {
     'CODEX_ACP_MAX_STDERR_CHARS',
     2048,
   );
+  final lineBytes = _positiveInt(
+    environment,
+    'CODEX_ACP_MAX_LINE_BYTES',
+    CodexAdapterOptions.defaultMaximumAppServerLineBytes,
+  );
   final executable = environment['CODEX_EXECUTABLE']?.trim();
   final provider = environment['CODEX_ACP_MODEL_PROVIDER']?.trim();
   return CodexAdapterOptions(
@@ -125,6 +130,7 @@ CodexAdapterOptions _optionsFromEnvironment(Map<String, String> environment) {
     environment: environment,
     shutdownTimeout: Duration(milliseconds: timeoutMs),
     maximumStderrTailCharacters: stderrCharacters,
+    maximumAppServerLineBytes: lineBytes,
   );
 }
 

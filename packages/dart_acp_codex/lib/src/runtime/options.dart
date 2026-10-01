@@ -33,6 +33,7 @@ final class CodexAdapterOptions {
     this.workspaceWriteNetworkAccess = false,
     this.shutdownTimeout = const Duration(seconds: 2),
     this.maximumStderrTailCharacters = 2048,
+    this.maximumAppServerLineBytes = defaultMaximumAppServerLineBytes,
     this.mcpRevivePollInterval = const Duration(milliseconds: 300),
     this.mcpRevivePollAttempts = 30,
     this.onDiagnostic,
@@ -53,6 +54,11 @@ final class CodexAdapterOptions {
     if (maximumStderrTailCharacters <= 0) {
       throw const CodexConfigurationException(
         'Maximum stderr tail characters must be positive.',
+      );
+    }
+    if (maximumAppServerLineBytes <= 0) {
+      throw const CodexConfigurationException(
+        'Maximum app-server line bytes must be positive.',
       );
     }
     if (mcpRevivePollInterval <= Duration.zero) {
@@ -120,6 +126,24 @@ final class CodexAdapterOptions {
 
   /// Maximum stderr characters retained for process-failure context.
   final int maximumStderrTailCharacters;
+
+  /// Largest single app-server message accepted, in bytes excluding its
+  /// newline. A longer message fails the connection.
+  ///
+  /// The cap exists to stop a runaway peer, not to bound legitimate output.
+  /// `thread/resume` answers with the thread's ENTIRE turn history as one
+  /// message, every command's aggregated output included, so a long-lived
+  /// thread outgrows any modest cap and then fails on every reopen. The
+  /// previous implicit 16 MiB (the SDK's NDJSON default) did exactly that.
+  final int maximumAppServerLineBytes;
+
+  /// 256 MiB.
+  ///
+  /// A month-long, 122-turn thread already resumes as a single 14.9 MiB
+  /// message, and the resume grows with every command the thread runs. This
+  /// leaves more than an order of magnitude of headroom while still stopping
+  /// a peer that never ends its line before it exhausts memory.
+  static const int defaultMaximumAppServerLineBytes = 256 * 1024 * 1024;
 
   /// How often the pre-turn MCP revive re-checks server health while waiting
   /// for a reloaded server to come back up.

@@ -53,6 +53,22 @@ void main() {
       );
     });
 
+    test('app-server line cap defaults to 256 MiB and must be positive', () {
+      expect(
+        CodexAdapterOptions(
+          environment: const <String, String>{},
+        ).maximumAppServerLineBytes,
+        256 * 1024 * 1024,
+      );
+      expect(
+        () => CodexAdapterOptions(
+          environment: const <String, String>{},
+          maximumAppServerLineBytes: 0,
+        ),
+        throwsA(isA<CodexConfigurationException>()),
+      );
+    });
+
     test('model selection parses the final effort component', () {
       final selection = CodexModelSelection.parse('gpt/custom/high');
       expect(selection.model, 'gpt/custom');

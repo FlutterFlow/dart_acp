@@ -125,6 +125,71 @@ void main() {
     await runtime.close();
   });
 
+  test('opens a thread whose history is one line over 16 MiB', () async {
+    // The previous cap was the SDK's 16 MiB NDJSON default, and a real
+    // month-long thread already resumes as a single 14.9 MiB line. Both ACP
+    // entry points send `thread/resume`: session/resume discards the history
+    // and session/load replays it, but both receive it as that one line.
+    const outputBytes = 20 * 1024 * 1024;
+    final updates = <SessionNotification>[];
+    final agent = await _connectToFakeProcess(
+      CodexAdapterOptions(
+        executable: _fakeExecutable,
+        environment: _resumeEnvironment(outputBytes),
+      ),
+      updates,
+    );
+
+    await agent.resumeSession(
+      ResumeSessionRequest(sessionId: SessionId('resumed'), cwd: '/workspace'),
+    );
+    await agent.loadSession(
+      LoadSessionRequest(
+        sessionId: SessionId('loaded'),
+        cwd: '/workspace',
+        mcpServers: const <McpServer>[],
+      ),
+    );
+
+    expect(<String>[
+      for (final notification in updates)
+        if (notification.update.toJson()['rawOutput'] case <String, Object?>{
+          'formatted_output': final String output,
+        })
+          output,
+    ], anyElement(hasLength(outputBytes)));
+  });
+
+  test('fails a line over the configured maximum, naming it', () async {
+    final agent = await _connectToFakeProcess(
+      CodexAdapterOptions(
+        executable: _fakeExecutable,
+        environment: _resumeEnvironment(2 * 1024 * 1024),
+        maximumAppServerLineBytes: 1024 * 1024,
+      ),
+      <SessionNotification>[],
+    );
+
+    await expectLater(
+      agent.resumeSession(
+        ResumeSessionRequest(
+          sessionId: SessionId('resumed'),
+          cwd: '/workspace',
+        ),
+      ),
+      throwsA(
+        isA<JsonRpcRequestException>().having(
+          (error) => '${error.data}',
+          'data',
+          allOf(
+            contains('LineLengthExceededException'),
+            contains('maximum: 1048576'),
+          ),
+        ),
+      ),
+    );
+  });
+
   test('kills an unresponsive owned process after the grace period', () async {
     final runtime = await CodexRuntime.start(
       options: CodexAdapterOptions(
@@ -140,4 +205,35 @@ void main() {
     await runtime.close();
     expect(await runtime.exitCode, isNot(0));
   });
+}
+
+Map<String, String> _resumeEnvironment(int outputBytes) => <String, String>{
+  ...Platform.environment,
+  'FAKE_CODEX_RESUME_OUTPUT_BYTES': '$outputBytes',
+};
+
+/// Connects an ACP client to an agent over a real fake app-server process,
+/// collecting session updates into [updates].
+Future<AcpClientContext> _connectToFakeProcess(
+  CodexAdapterOptions options,
+  List<SessionNotification> updates,
+) async {
+  final runtime = await CodexRuntime.start(options: options);
+  addTearDown(runtime.close);
+  final client =
+      AcpClientApp.v1(
+        implementation: Implementation(name: 'runtime-test', version: '1.0.0'),
+        capabilities: ClientCapabilities.fromJson(<String, Object?>{
+          'fs': <String, Object?>{
+            'readTextFile': false,
+            'writeTextFile': false,
+          },
+          'terminal': false,
+        }),
+      ).onSessionUpdate((context) {
+        updates.add(context.params);
+      });
+  final pair = await client.connectWith(runtime.createAgent().app);
+  addTearDown(pair.close);
+  return pair.client.agent;
 }
