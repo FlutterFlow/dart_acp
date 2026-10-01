@@ -34,6 +34,7 @@ final class CodexAdapterOptions {
     this.shutdownTimeout = const Duration(seconds: 2),
     this.maximumStderrTailCharacters = 2048,
     this.maximumAppServerLineBytes = defaultMaximumAppServerLineBytes,
+    this.excludeTurnsOnResume = false,
     this.mcpRevivePollInterval = const Duration(milliseconds: 300),
     this.mcpRevivePollAttempts = 30,
     this.onDiagnostic,
@@ -144,6 +145,26 @@ final class CodexAdapterOptions {
   /// leaves more than an order of magnitude of headroom while still stopping
   /// a peer that never ends its line before it exhausts memory.
   static const int defaultMaximumAppServerLineBytes = 256 * 1024 * 1024;
+
+  /// Whether `session/resume` asks Codex to leave the turn history out of its
+  /// `thread/resume` response (`excludeTurns: true`).
+  ///
+  /// `session/resume` never replays history, but `thread/resume` still sends
+  /// the whole thread as one message by default, every command's output
+  /// included. For a long-lived thread that is tens of MiB, decoded only to be
+  /// dropped. With this on, the response is a few KB of thread metadata. The
+  /// thread's model context does not come from this response, so it is kept
+  /// either way. `session/load` replays the history, so it still asks for it.
+  ///
+  /// Some Codex versions then also skip replaying the thread's restored token
+  /// usage after the response (0.131 skips it, 0.159 still sends it), so a
+  /// resumed session may report no `usage_update` until its next turn does.
+  ///
+  /// codex-cli 0.125 through 0.128, and 0.151 onward, accept the flag. 0.129
+  /// through 0.150 accept it under the `experimentalApi` capability, which
+  /// this adapter declares. Older app servers ignore it and send the full
+  /// history, as they do when this is off.
+  final bool excludeTurnsOnResume;
 
   /// How often the pre-turn MCP revive re-checks server health while waiting
   /// for a reloaded server to come back up.

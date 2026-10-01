@@ -111,6 +111,21 @@ effort, and the fast service tier when the selected model supports it.
 Standard and plan collaboration modes are available through ACP session mode
 methods and `/plan`.
 
+`session/resume` does not replay history, but by default Codex still answers
+its `thread/resume` with the thread's whole turn history as one message. A
+client can ask for thread metadata only:
+
+```dart
+CodexAdapterOptions(excludeTurnsOnResume: true);
+```
+
+That sends `excludeTurns: true`, which shrinks the response from the size of
+the history to a few KB. The thread keeps its model context. Some Codex
+versions then also skip replaying the thread's restored token usage, so the
+first `usage_update` may only arrive with the next turn. `session/load` still
+requests and replays the history. codex-cli releases before 0.125 ignore the
+flag.
+
 Embedded clients can select Codex's native automatic approval reviewer for
 standard workspace-write turns:
 
